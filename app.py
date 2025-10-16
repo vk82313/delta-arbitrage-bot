@@ -170,18 +170,21 @@ class ArbitrageBot:
         self.start_websocket()
     
     def on_open(self, ws):
-        print("✅ WebSocket connected - subscribing to ALL ticker data...")
-        # Subscribe to ALL ticker data (we'll filter for options in code)
+        print("✅ WebSocket connected - subscribing to ALL options data...")
+        # Subscribe to ALL symbols using "all" keyword
         subscribe_msg = {
             "type": "subscribe",
             "payload": {
                 "channels": [
-                    {"name": "ticker"}  # Subscribe to all ticker data
+                    {
+                        "name": "v2/ticker",
+                        "symbols": ["all"]
+                    }
                 ]
             }
         }
         ws.send(json.dumps(subscribe_msg))
-        print("✅ Subscribed to ticker channel")
+        print("✅ Subscribed to ALL market data")
     
     def start_websocket(self):
         """Start WebSocket connection"""
