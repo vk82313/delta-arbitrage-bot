@@ -37,14 +37,29 @@ class ArbitrageBot:
         except Exception as e:
             print(f"❌ Telegram error: {e}")
     
-    def on_message(self, ws, message):
-        """Process WebSocket messages"""
-        try:
-            data = json.loads(message)
+   def on_message(self, ws, message):
+    """Process WebSocket messages"""
+    try:
+        data = json.loads(message)
+        
+        # Check if this is options ticker data
+        if (isinstance(data, dict) and 'symbol' in data and 'mark_price' in data and
+            ('C-' in data['symbol'] or 'P-' in data['symbol'])):
             
-           # Check if this is options ticker data
-if (isinstance(data, dict) and 'symbol' in data and 'mark_price' in data and
-    ('C-' in data['symbol'] or 'P-' in data['symbol'])):
+            symbol = data['symbol']
+            bid_price = float(data.get('best_bid_price', 0)) or float(data.get('bid', 0))
+            ask_price = float(data.get('best_ask_price', 0)) or float(data.get('ask', 0))
+            
+            # Store in appropriate dictionary
+            if 'BTC' in symbol:
+                btc_options[symbol] = {'bid': bid_price, 'ask': ask_price}
+                self.check_arbitrage('BTC', btc_options)
+            elif 'ETH' in symbol:
+                eth_options[symbol] = {'bid': bid_price, 'ask': ask_price}
+                self.check_arbitrage('ETH', eth_options)
+                
+    except Exception as e:
+        print(f"❌ Message error: {e}")
                 
                 symbol = data['symbol']
                 bid_price = float(data.get('best_bid_price', 0))
@@ -165,8 +180,8 @@ if (isinstance(data, dict) and 'symbol' in data and 'mark_price' in data and
             "type": "subscribe",
             "payload": {
                "channels": [
-    {"name": "v2/ticker", "symbols": ["BTC-.*-C", "BTC-.*-P", "ETH-.*-C", "ETH-.*-P"]}
-]
+                {"name": "v2/ticker", "symbols": ["BTC-.*-C", "BTC-.*-P", "ETH-.*-C", "ETH-.*-P"]}
+                    ]
             }
         }
         ws.send(json.dumps(subscribe_msg))
