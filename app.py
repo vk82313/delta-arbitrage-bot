@@ -1,133 +1,147 @@
 import requests
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-# ===== Telegram Config =====
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+# ---------------- Configuration ---------------- #
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ===== Delta Exchange Config =====
 BASE_URL = "https://api.india.delta.exchange/v2"
-ASSETS = ["BTC", "ETH"]
+FETCH_INTERVAL = 1  # seconds
+
+# Minimum arbitrage difference
 MIN_DIFF = {"BTC": 2, "ETH": 0.16}
 
-# ===== Store last alerts to prevent spam (1 per strike per minute) =====
-last_alert_ts = {}
+# Store last alerts to prevent spamming
+last_alert = {}
 
-# ===== Helper Functions =====
+# ---------------- Utility Functions ---------------- #
+
+def send_telegram_alert(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        requests.post(url, json=payload, timeout=5)
+        print(f"✅ Telegram alert sent")
+    except Exception as e:
+        print(f"❌ Telegram send error: {e}")
+
+def get_current_expiry():
+    now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    if now.hour > 17 or (now.hour == 17 and now.minute >= 30):
+        expiry_date = now + timedelta(days=1)
+    else:
+        expiry_date = now
+    return expiry_date.strftime("%d%m%y")
+
 def fetch_products():
-    resp = requests.get(f"{BASE_URL}/products")
-    return resp.json().get("result", []) if resp.status_code == 200 else []
+    try:
+        res = requests.get(BASE_URL + "/products", timeout=10)
+        data = res.json().get("result", [])
+        return data
+    except Exception as e:
+        print(f"❌ fetch_products error: {e}")
+        return []
 
 def fetch_tickers():
-    resp = requests.get(f"{BASE_URL}/tickers")
-    return resp.json().get("result", []) if resp.status_code == 200 else []
+    try:
+        res = requests.get(BASE_URL + "/tickers", timeout=10)
+        data = res.json().get("result", [])
+        return data
+    except Exception as e:
+        print(f"❌ fetch_tickers error: {e}")
+        return []
 
-def parse_expiry(code):
-    if not code or len(code) != 6:
-        return code
-    dd, mm, yy = code[:2], code[2:4], code[4:]
-    return f"20{yy}-{mm}-{dd}"
+def extract_strike(symbol):
+    parts = symbol.split("-")
+    for part in parts:
+        if part.isdigit():
+            return int(part)
+    return None
 
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+# ---------------- Core Logic ---------------- #
 
-# ===== Build Options Table =====
-def build_options_table(asset, products, tickers):
-    asset_upper = asset.upper()
-    options = []
-    ticker_map = {t['symbol']: t for t in tickers}
-    ticker_map.update({t['symbol'].upper(): t for t in tickers})
-    ticker_map.update({t['symbol'].replace("-", "").upper(): t for t in tickers})
+def build_options_map(asset, expiry):
+    products = fetch_products()
+    tickers = fetch_tickers()
 
-    # Filter options
-    candidates = [p for p in products if p.get("contract_type", "").lower() in ["call", "put", "option"]
-                  and (asset_upper in (p.get("symbol") or "") or asset_upper in (p.get("underlying_asset", {}).get("symbol") or ""))]
+    ticker_map = {t['symbol']: t for t in tickers if 'symbol' in t}
 
-    expiries = sorted({p["symbol"].split("-")[-1] for p in candidates})
-    selected_expiry = expiries[0] if expiries else None
-
-    for p in candidates:
-        sym = p["symbol"]
-        if not sym.endswith(selected_expiry):
+    options_map = {}
+    for p in products:
+        symbol = p.get('symbol')
+        if not symbol or asset not in symbol or expiry not in symbol:
             continue
-        parts = sym.split("-")
-        strike = next((int(x) for x in parts if x.isdigit()), None)
+        strike = extract_strike(symbol)
         if strike is None:
             continue
-        expiry = parse_expiry(parts[-1])
-        ticker = ticker_map.get(sym) or ticker_map.get(sym.upper()) or ticker_map.get(sym.replace("-", "").upper())
-        bid = ticker.get("best_bid_price") or ticker.get("best_bid") or ticker.get("quotes", {}).get("best_bid") or ticker.get("bid")
-        ask = ticker.get("best_ask_price") or ticker.get("best_ask") or ticker.get("quotes", {}).get("best_ask") or ticker.get("ask")
-        options.append({
-            "strike": strike,
-            "expiry": expiry,
-            "type": p["contract_type"].lower(),
-            "bid": float(bid) if bid else None,
-            "ask": float(ask) if ask else None
-        })
+        if strike not in options_map:
+            options_map[strike] = {'call': {}, 'put': {}}
 
-    # Group by strike
-    strikes = {}
-    for opt in options:
-        s = opt["strike"]
-        if s not in strikes:
-            strikes[s] = {"call": None, "put": None, "expiry": opt["expiry"]}
-        if "call" in opt["type"]:
-            strikes[s]["call"] = opt
-        elif "put" in opt["type"]:
-            strikes[s]["put"] = opt
+        ticker = ticker_map.get(symbol, {})
+        bid = ticker.get('best_bid_price') or ticker.get('bid') or 0
+        ask = ticker.get('best_ask_price') or ticker.get('ask') or 0
 
-    return [strikes[s] for s in sorted(strikes.keys())]
+        if symbol.endswith("-C"):
+            options_map[strike]['call'] = {'bid': float(bid), 'ask': float(ask)}
+        elif symbol.endswith("-P"):
+            options_map[strike]['put'] = {'bid': float(bid), 'ask': float(ask)}
+    return options_map
 
-# ===== Check and Send Alerts =====
-def check_arbitrage(asset, table):
-    now = int(time.time() * 1000)
+def check_arbitrage(asset, options_map):
+    strikes = sorted(options_map.keys())
     alerts = []
 
-    for i in range(len(table) - 1):
-        curr = table[i]
-        nxt = table[i + 1]
-        strike = curr["call"]["strike"] if curr["call"] else curr["put"]["strike"]
+    for i in range(len(strikes) - 1):
+        s1 = strikes[i]
+        s2 = strikes[i+1]
 
-        # Call alert
-        if curr["call"] and nxt["call"] and curr["call"]["ask"] is not None and nxt["call"]["bid"] is not None:
-            diff = nxt["call"]["bid"] - curr["call"]["ask"]
-            if diff < 0 and abs(diff) >= MIN_DIFF[asset]:
-                key = f"{asset}_CALL_{strike}"
-                last = last_alert_ts.get(key, 0)
-                if now - last >= 60000:  # 1 alert per strike per minute
-                    alerts.append(f"CALL {strike}: Ask {curr['call']['ask']} vs Next Bid {nxt['call']['bid']} → Δ {abs(diff):.2f}")
-                    last_alert_ts[key] = now
+        # CALL arbitrage: ask - next bid < 0
+        c1_ask = options_map[s1]['call'].get('ask', 0)
+        c2_bid = options_map[s2]['call'].get('bid', 0)
+        if c1_ask and c2_bid and (c1_ask - c2_bid) < 0 and abs(c1_ask - c2_bid) >= MIN_DIFF[asset]:
+            key = f"{asset}_CALL_{s1}_{s2}"
+            now = time.time()
+            if now - last_alert.get(key, 0) >= 60:
+                alerts.append(f"🔷 CALL {s1} Ask: {c1_ask:.2f} vs {s2} Bid: {c2_bid:.2f} → Profit: {abs(c1_ask - c2_bid):.2f}")
+                last_alert[key] = now
 
-        # Put alert
-        if curr["put"] and nxt["put"] and curr["put"]["bid"] is not None and nxt["put"]["ask"] is not None:
-            diff = curr["put"]["bid"] - nxt["put"]["ask"]
-            if diff < 0 and abs(diff) >= MIN_DIFF[asset]:
-                key = f"{asset}_PUT_{strike}"
-                last = last_alert_ts.get(key, 0)
-                if now - last >= 60000:  # 1 alert per strike per minute
-                    alerts.append(f"PUT {strike}: Next Ask {nxt['put']['ask']} vs Bid {curr['put']['bid']} → Δ {abs(diff):.2f}")
-                    last_alert_ts[key] = now
+        # PUT arbitrage: next ask - bid < 0
+        p1_bid = options_map[s1]['put'].get('bid', 0)
+        p2_ask = options_map[s2]['put'].get('ask', 0)
+        if p1_bid and p2_ask and (p2_ask - p1_bid) < 0 and abs(p2_ask - p1_bid) >= MIN_DIFF[asset]:
+            key = f"{asset}_PUT_{s1}_{s2}"
+            now = time.time()
+            if now - last_alert.get(key, 0) >= 60:
+                alerts.append(f"🟣 PUT {s1} Bid: {p1_bid:.2f} vs {s2} Ask: {p2_ask:.2f} → Profit: {abs(p2_ask - p1_bid):.2f}")
+                last_alert[key] = now
 
     if alerts:
-        header = f"*{asset} OPTIONS ALERTS*\nUpdated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        send_telegram(header + "\n".join(alerts))
+        msg = f"🚨 *{asset} OPTIONS ARBITRAGE ALERT* 🚨\nTime: {datetime.now().strftime('%H:%M:%S')}\n\n" + "\n".join(alerts)
+        send_telegram_alert(msg)
+        print(f"✅ Sent {len(alerts)} {asset} alerts")
 
-# ===== Main Loop: Fetch every second =====
-def main_loop():
+# ---------------- Main Loop ---------------- #
+
+def main():
+    print("🚀 Starting Delta Options Arbitrage Bot (1-second fetch)...")
+    expiry = get_current_expiry()
+    print(f"📅 Using expiry: {expiry}")
+
     while True:
         try:
-            products = fetch_products()
-            tickers = fetch_tickers()
-            for asset in ASSETS:
-                table = build_options_table(asset, products, tickers)
-                check_arbitrage(asset, table)  # alerts only sent if conditions met
-            time.sleep(1)  # fetch every second
+            for asset in ["BTC", "ETH"]:
+                options_map = build_options_map(asset, expiry)
+                check_arbitrage(asset, options_map)
+            time.sleep(FETCH_INTERVAL)
         except Exception as e:
-            print("Error:", e)
-            time.sleep(1)
+            print(f"❌ Main loop error: {e}")
+            time.sleep(2)
 
 if __name__ == "__main__":
-    main_loop()
+    main()
