@@ -165,7 +165,7 @@ class ArbitrageBot:
             "type": "subscribe",
             "payload": {
                 "channels": [
-                    {"name": "options_ticker", "symbols": ["BTC-.*-C", "BTC-.*-P", "ETH-.*-C", "ETH-.*-P"]}
+                    {"name": "option_ticker", "symbols": ["BTC-.*-C", "BTC-.*-P", "ETH-.*-C", "ETH-.*-P"]}
                 ]
             }
         }
