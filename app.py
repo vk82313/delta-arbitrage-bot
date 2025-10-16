@@ -42,21 +42,26 @@ class ArbitrageBot:
         try:
             data = json.loads(message)
             
-            # Check if this is options ticker data
-            if (isinstance(data, dict) and 'symbol' in data and 'mark_price' in data and
-                ('C-' in data['symbol'] or 'P-' in data['symbol'])):
-                
+            # Check if this is options data (contains C- or P- in symbol)
+            if isinstance(data, dict) and 'symbol' in data:
                 symbol = data['symbol']
-                bid_price = float(data.get('best_bid_price', 0)) or float(data.get('bid', 0))
-                ask_price = float(data.get('best_ask_price', 0)) or float(data.get('ask', 0))
                 
-                # Store in appropriate dictionary
-                if 'BTC' in symbol:
-                    btc_options[symbol] = {'bid': bid_price, 'ask': ask_price}
-                    self.check_arbitrage('BTC', btc_options)
-                elif 'ETH' in symbol:
-                    eth_options[symbol] = {'bid': bid_price, 'ask': ask_price}
-                    self.check_arbitrage('ETH', eth_options)
+                if 'C-' in symbol or 'P-' in symbol:
+                    # Extract bid/ask prices from different possible fields
+                    bid_price = float(data.get('best_bid_price', 0)) or float(data.get('bid', 0)) or float(data.get('best_bid', 0))
+                    ask_price = float(data.get('best_ask_price', 0)) or float(data.get('ask', 0)) or float(data.get('best_ask', 0))
+                    
+                    # Only process if we have valid prices
+                    if bid_price > 0 and ask_price > 0:
+                        # Store in appropriate dictionary
+                        if 'BTC' in symbol:
+                            btc_options[symbol] = {'bid': bid_price, 'ask': ask_price}
+                            self.check_arbitrage('BTC', btc_options)
+                        elif 'ETH' in symbol:
+                            eth_options[symbol] = {'bid': bid_price, 'ask': ask_price}
+                            self.check_arbitrage('ETH', eth_options)
+                        else:
+                            print(f"📊 Received data: {symbol} - Bid: {bid_price}, Ask: {ask_price}")
                     
         except Exception as e:
             print(f"❌ Message error: {e}")
@@ -91,6 +96,9 @@ class ArbitrageBot:
             # Sort strikes
             sorted_strikes = sorted(strikes.keys())
             
+            if len(sorted_strikes) < 2:
+                return  # Need at least 2 strikes to compare
+            
             # Check adjacent strikes for arbitrage
             alerts = []
             for i in range(len(sorted_strikes) - 1):
@@ -98,10 +106,11 @@ class ArbitrageBot:
                 strike2 = sorted_strikes[i + 1]
                 
                 # CALL arbitrage: Buy lower strike, sell higher strike
-                if (strikes[strike1]['call'].get('ask', 0) > 0 and 
-                    strikes[strike2]['call'].get('bid', 0) > 0):
-                    
-                    call_diff = strikes[strike1]['call']['ask'] - strikes[strike2]['call']['bid']
+                call1_ask = strikes[strike1]['call'].get('ask', 0)
+                call2_bid = strikes[strike2]['call'].get('bid', 0)
+                
+                if call1_ask > 0 and call2_bid > 0:
+                    call_diff = call1_ask - call2_bid
                     min_diff = 2 if asset == 'BTC' else 0.16
                     
                     if call_diff < 0 and abs(call_diff) >= min_diff:
@@ -109,16 +118,17 @@ class ArbitrageBot:
                         if self.can_alert(alert_key):
                             profit = abs(call_diff)
                             alerts.append(
-                                f"🔷 CALL {strike1} Ask: ${strikes[strike1]['call']['ask']:.2f} vs "
-                                f"{strike2} Bid: ${strikes[strike2]['call']['bid']:.2f} → "
+                                f"🔷 CALL {strike1} Ask: ${call1_ask:.2f} vs "
+                                f"{strike2} Bid: ${call2_bid:.2f} → "
                                 f"Profit: ${profit:.2f}"
                             )
                 
                 # PUT arbitrage: Sell lower strike, buy higher strike
-                if (strikes[strike1]['put'].get('bid', 0) > 0 and 
-                    strikes[strike2]['put'].get('ask', 0) > 0):
-                    
-                    put_diff = strikes[strike2]['put']['ask'] - strikes[strike1]['put']['bid']
+                put1_bid = strikes[strike1]['put'].get('bid', 0)
+                put2_ask = strikes[strike2]['put'].get('ask', 0)
+                
+                if put1_bid > 0 and put2_ask > 0:
+                    put_diff = put2_ask - put1_bid
                     min_diff = 2 if asset == 'BTC' else 0.16
                     
                     if put_diff < 0 and abs(put_diff) >= min_diff:
@@ -126,8 +136,8 @@ class ArbitrageBot:
                         if self.can_alert(alert_key):
                             profit = abs(put_diff)
                             alerts.append(
-                                f"🟣 PUT {strike1} Bid: ${strikes[strike1]['put']['bid']:.2f} vs "
-                                f"{strike2} Ask: ${strikes[strike2]['put']['ask']:.2f} → "
+                                f"🟣 PUT {strike1} Bid: ${put1_bid:.2f} vs "
+                                f"{strike2} Ask: ${put2_ask:.2f} → "
                                 f"Profit: ${profit:.2f}"
                             )
             
@@ -136,6 +146,7 @@ class ArbitrageBot:
                 message = f"🚨 *{asset} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
                 message += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S')}_"
                 self.send_telegram_alert(message)
+                print(f"✅ Sent {len(alerts)} {asset} arbitrage alerts")
                 
         except Exception as e:
             print(f"❌ Arbitrage check error: {e}")
@@ -159,17 +170,18 @@ class ArbitrageBot:
         self.start_websocket()
     
     def on_open(self, ws):
-        print("✅ WebSocket connected - subscribing to options data...")
-        # Subscribe to BTC and ETH options
+        print("✅ WebSocket connected - subscribing to ALL ticker data...")
+        # Subscribe to ALL ticker data (we'll filter for options in code)
         subscribe_msg = {
             "type": "subscribe",
             "payload": {
                 "channels": [
-                    {"name": "v2/ticker", "symbols": ["BTC-.*-C", "BTC-.*-P", "ETH-.*-C", "ETH-.*-P"]}
+                    {"name": "ticker"}  # Subscribe to all ticker data
                 ]
             }
         }
         ws.send(json.dumps(subscribe_msg))
+        print("✅ Subscribed to ticker channel")
     
     def start_websocket(self):
         """Start WebSocket connection"""
@@ -207,6 +219,10 @@ def home():
 @app.route('/health')
 def health():
     return "🟢 Healthy - " + datetime.now().strftime("%H:%M:%S")
+
+@app.route('/ping')
+def ping():
+    return "🏓 Pong - " + datetime.now().strftime("%H:%M:%S")
 
 # Start the bot when app loads
 bot_thread = threading.Thread(target=bot.start)
