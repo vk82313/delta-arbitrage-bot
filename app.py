@@ -18,8 +18,8 @@ btc_options = {}
 eth_options = {}
 last_alert = {}
 current_expiry = None
-last_expiry_check = 0
 active_symbols = []
+last_symbol_refresh = 0
 
 class ArbitrageBot:
     def __init__(self):
@@ -28,10 +28,10 @@ class ArbitrageBot:
         print(f"🚀 Starting Delta Arbitrage Bot...")
         print(f"📅 Initial Expiry: {self.current_expiry}")
         
-    def fetch_active_options_symbols(self):
-        """Fetch ALL actively traded BTC/ETH options symbols from Delta API"""
+    def fetch_all_available_options_symbols(self):
+        """Fetch ALL available BTC/ETH options symbols for current expiry"""
         try:
-            print("🔍 Fetching active options symbols from Delta API...")
+            print("🔍 Fetching ALL available options symbols from Delta API...")
             url = "https://api.delta.exchange/v2/products"
             response = requests.get(url, timeout=10)
             
@@ -42,16 +42,15 @@ class ArbitrageBot:
                 
                 for product in products:
                     symbol = product.get('symbol', '')
-                    contract_type = product.get('contract_type', '')
-                    trading_status = product.get('product_trading_status', '')
+                    contract_type = product.get('contract_type', '').lower()
                     
-                    # Filter for BTC/ETH options that are operational
-                    if (contract_type in ['call_options', 'put_options', 'call', 'put'] and 
-                        trading_status == 'operational'):
-                        
-                        if symbol.startswith('BTC-') and self.current_expiry in symbol:
+                    # Filter for BTC/ETH options for CURRENT expiry
+                    is_option = any(opt in contract_type for opt in ['call', 'put', 'option'])
+                    
+                    if is_option and self.current_expiry in symbol:
+                        if symbol.startswith('BTC-'):
                             btc_symbols.append(symbol)
-                        elif symbol.startswith('ETH-') and self.current_expiry in symbol:
+                        elif symbol.startswith('ETH-'):
                             eth_symbols.append(symbol)
                 
                 # Remove duplicates and sort
@@ -59,9 +58,18 @@ class ArbitrageBot:
                 eth_symbols = sorted(list(set(eth_symbols)))
                 
                 all_symbols = btc_symbols + eth_symbols
-                print(f"✅ Found {len(btc_symbols)} BTC options, {len(eth_symbols)} ETH options")
-                print(f"📊 BTC Symbols: {btc_symbols[:5]}...")  # Show first 5
-                print(f"📊 ETH Symbols: {eth_symbols[:5]}...")  # Show first 5
+                
+                # Extract strike information
+                btc_strikes = sorted(list(set([self.extract_strike(sym) for sym in btc_symbols])))
+                eth_strikes = sorted(list(set([self.extract_strike(sym) for sym in eth_symbols])))
+                
+                print(f"🎯 Found {len(btc_symbols)} BTC options across {len(btc_strikes)} strikes")
+                print(f"🎯 Found {len(eth_symbols)} ETH options across {len(eth_strikes)} strikes")
+                
+                if btc_strikes:
+                    print(f"📊 BTC Strike Range: {btc_strikes[0]:,} to {btc_strikes[-1]:,} ({len(btc_strikes)} strikes)")
+                if eth_strikes:
+                    print(f"📊 ETH Strike Range: {eth_strikes[0]:,} to {eth_strikes[-1]:,} ({len(eth_strikes)} strikes)")
                 
                 return all_symbols
             else:
@@ -81,10 +89,10 @@ class ArbitrageBot:
         
         # Check if past 5:30 PM IST
         if ist_now.hour >= 17 and ist_now.minute >= 30:
-            # Use next day
+            # Use next day (after today's expiry)
             expiry_date = ist_now + timedelta(days=1)
         else:
-            # Use today
+            # Use today (before expiry)
             expiry_date = ist_now
         
         # Format as DDMMYY (Delta Exchange format)
@@ -92,52 +100,48 @@ class ArbitrageBot:
         print(f"🔄 Auto-detected expiry: {expiry_str} (IST: {ist_now.strftime('%Y-%m-%d %H:%M')})")
         return expiry_str
     
-    def should_update_expiry(self):
-        """Check if we need to update expiry (every hour or after 5:30 PM IST)"""
-        global last_expiry_check
+    def should_refresh_symbols(self):
+        """Check if we should refresh symbols (every 2 hours or after expiry change)"""
+        global last_symbol_refresh, current_expiry
         now = time.time()
         
-        # Check every hour or if more than 2 hours since last check
-        if now - last_expiry_check >= 3600:  # 1 hour
-            last_expiry_check = now
-            new_expiry = self.get_current_expiry()
-            if new_expiry != self.current_expiry:
-                print(f"🔄 Expiry changed: {self.current_expiry} -> {new_expiry}")
+        # Check current expiry
+        new_expiry = self.get_current_expiry()
+        expiry_changed = new_expiry != current_expiry
+        
+        # Refresh every 2 hours OR if expiry changed
+        if now - last_symbol_refresh >= 7200 or expiry_changed:  # 2 hours
+            last_symbol_refresh = now
+            if expiry_changed:
+                print(f"🔄 Expiry changed: {current_expiry} -> {new_expiry}")
+                current_expiry = new_expiry
                 self.current_expiry = new_expiry
-                return True
+            return True
+        
         return False
     
     def get_options_symbols(self):
-        """Get ALL actively traded BTC/ETH options symbols for current expiry"""
+        """Get ALL available BTC/ETH options symbols for current expiry"""
         global active_symbols
-        active_symbols = self.fetch_active_options_symbols()
+        active_symbols = self.fetch_all_available_options_symbols()
         
         if not active_symbols:
-            print("⚠️ No active options found, using default strikes...")
-            # Fallback to default strikes if API fails
-            return self.get_default_symbols()
+            print("⚠️ No options symbols found for current expiry")
+            return []
         
+        print(f"✅ Monitoring ALL {len(active_symbols)} available options for expiry {self.current_expiry}")
         return active_symbols
     
-    def get_default_symbols(self):
-        """Fallback default symbols if API fails"""
-        symbols = []
-        
-        # Default strike prices
-        btc_strikes = [55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000, 63000, 64000, 65000, 66000, 67000, 68000, 69000, 70000]
-        eth_strikes = [2500, 2600, 2700, 2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000]
-        
-        # Generate BTC options symbols
-        for strike in btc_strikes:
-            symbols.append(f"BTC-{self.current_expiry}-{strike}-C")
-            symbols.append(f"BTC-{self.current_expiry}-{strike}-P")
-        
-        # Generate ETH options symbols
-        for strike in eth_strikes:
-            symbols.append(f"ETH-{self.current_expiry}-{strike}-C")
-            symbols.append(f"ETH-{self.current_expiry}-{strike}-P")
-        
-        return symbols
+    def extract_strike(self, symbol):
+        """Extract strike price from symbol"""
+        try:
+            parts = symbol.split('-')
+            for part in parts:
+                if part.isdigit():
+                    return int(part)
+            return 0
+        except:
+            return 0
     
     def send_telegram_alert(self, message):
         """Send alert to Telegram"""
@@ -182,17 +186,6 @@ class ArbitrageBot:
         except Exception as e:
             print(f"❌ Message error: {e}")
     
-    def extract_strike(self, symbol):
-        """Extract strike price from symbol"""
-        try:
-            parts = symbol.split('-')
-            for part in parts:
-                if part.isdigit():
-                    return int(part)
-            return 0
-        except:
-            return 0
-    
     def check_arbitrage(self, asset, options_data):
         """Check for arbitrage opportunities"""
         try:
@@ -234,8 +227,8 @@ class ArbitrageBot:
                         if self.can_alert(alert_key):
                             profit = abs(call_diff)
                             alerts.append(
-                                f"🔷 CALL {strike1} Ask: ${call1_ask:.2f} vs "
-                                f"{strike2} Bid: ${call2_bid:.2f} → "
+                                f"🔷 CALL {strike1:,} Ask: ${call1_ask:.2f} vs "
+                                f"{strike2:,} Bid: ${call2_bid:.2f} → "
                                 f"Profit: ${profit:.2f}"
                             )
                 
@@ -252,8 +245,8 @@ class ArbitrageBot:
                         if self.can_alert(alert_key):
                             profit = abs(put_diff)
                             alerts.append(
-                                f"🟣 PUT {strike1} Bid: ${put1_bid:.2f} vs "
-                                f"{strike2} Ask: ${put2_ask:.2f} → "
+                                f"🟣 PUT {strike1:,} Bid: ${put1_bid:.2f} vs "
+                                f"{strike2:,} Ask: ${put2_ask:.2f} → "
                                 f"Profit: ${profit:.2f}"
                             )
             
@@ -288,12 +281,19 @@ class ArbitrageBot:
         self.start_websocket()
     
     def on_open(self, ws):
-        print("✅ WebSocket connected - fetching active options symbols...")
+        print("✅ WebSocket connected - fetching ALL available options symbols...")
         self.update_subscription(ws)
     
     def update_subscription(self, ws):
-        """Update WebSocket subscription with current expiry symbols"""
+        """Update WebSocket subscription with ALL available symbols"""
         symbols = self.get_options_symbols()
+        
+        if not symbols:
+            print("❌ No options symbols found - will retry in 10 minutes")
+            # Retry after 10 minutes
+            threading.Timer(600, lambda: self.update_subscription(ws)).start()
+            return
+        
         subscribe_msg = {
             "type": "subscribe",
             "payload": {
@@ -306,7 +306,7 @@ class ArbitrageBot:
             }
         }
         ws.send(json.dumps(subscribe_msg))
-        print(f"✅ Subscribed to {len(symbols)} actively traded BTC/ETH options")
+        print(f"✅ Subscribed to ALL {len(symbols)} available BTC/ETH options")
     
     def start_websocket(self):
         """Start WebSocket connection"""
@@ -319,18 +319,19 @@ class ArbitrageBot:
             on_close=self.on_close
         )
         
-        # Check for expiry updates every minute
-        def expiry_checker():
+        # Check for symbol refresh every 30 minutes
+        def symbol_refresher():
             while True:
-                if self.should_update_expiry():
-                    print("🔄 Expiry updated, reconnecting WebSocket...")
+                if self.should_refresh_symbols():
+                    print("🔄 Refreshing symbols (expiry changed or 2 hours passed)...")
                     if self.ws:
+                        # Reconnect to update subscription
                         self.ws.close()
-                time.sleep(60)  # Check every minute
+                time.sleep(1800)  # Check every 30 minutes
         
-        expiry_thread = threading.Thread(target=expiry_checker)
-        expiry_thread.daemon = True
-        expiry_thread.start()
+        refresh_thread = threading.Thread(target=symbol_refresher)
+        refresh_thread.daemon = True
+        refresh_thread.start()
         
         self.ws.run_forever()
     
@@ -349,11 +350,12 @@ def home():
     return f"""
     <h1>✅ Delta Arbitrage Bot Running</h1>
     <p>24/7 Real-time Options Arbitrage Detection</p>
-    <p>🔍 Monitoring: ALL Traded BTC & ETH Options</p>
+    <p>🔍 Monitoring: ALL Available BTC & ETH Options</p>
     <p>📅 Current Expiry: {bot.current_expiry}</p>
     <p>📊 Active Symbols: {len(active_symbols)}</p>
     <p>🔔 Alerts: Telegram Instant Notifications</p>
     <p>🔄 Auto-Expiry: Updates after 5:30 PM IST</p>
+    <p>🎯 Dynamic Strikes: ALL available strikes</p>
     <p>⏰ Status: Active</p>
     <p>Last update: {datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")}</p>
     """
