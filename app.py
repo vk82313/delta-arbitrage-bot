@@ -17,10 +17,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DELTA_THRESHOLD = {"BTC": 2, "ETH": 0.16}
 ALERT_COOLDOWN = 60
-PROCESS_INTERVAL = 2  # Process every 2 seconds
+PROCESS_INTERVAL = 2
 
 # -------------------------------
-# Delta WebSocket Client - CORRECTED
+# Delta WebSocket Client - FIXED ARBITRAGE LOGIC
 # -------------------------------
 class DeltaOptionsBot:
     def __init__(self):
@@ -40,17 +40,37 @@ class DeltaOptionsBot:
         now = datetime.now(timezone.utc)
         ist_now = now + timedelta(hours=5, minutes=30)
         
-        # For testing, let's try multiple expiry formats
         expiry_str = ist_now.strftime("%d%m%y")
         print(f"[{datetime.now()}] 📅 Using expiry: {expiry_str}")
         return expiry_str
 
+    def extract_expiry_from_symbol(self, symbol):
+        """Extract expiry date from symbol string"""
+        try:
+            # Symbol format: C-BTC-{strike}-{expiry} or P-BTC-{strike}-{expiry}
+            parts = symbol.split('-')
+            if len(parts) >= 4:
+                return parts[3]  # Expiry is the 4th part
+            return None
+        except:
+            return None
+
+    def extract_strike(self, symbol):
+        """Extract strike price from symbol"""
+        try:
+            parts = symbol.split('-')
+            for part in parts:
+                if part.isdigit() and len(part) > 2:  # Strike prices are usually > 100
+                    return int(part)
+            return 0
+        except:
+            return 0
+
     def get_all_options_symbols(self):
-        """Fetch ALL available BTC/ETH options symbols - CORRECTED"""
+        """Fetch ALL available BTC/ETH options symbols"""
         try:
             print(f"[{datetime.now()}] 🔍 Fetching options symbols from Delta API...")
             
-            # ✅ CORRECT: Use contract_types parameter to filter options
             url = "https://api.india.delta.exchange/v2/products"
             params = {
                 'contract_types': 'call_options,put_options',
@@ -68,11 +88,6 @@ class DeltaOptionsBot:
                 for product in products:
                     symbol = product.get('symbol', '')
                     contract_type = product.get('contract_type', '')
-                    underlying_asset = product.get('underlying_asset', {})
-                    
-                    # Debug: Print some product info
-                    if len(symbols) < 5:  # Print first 5 for debugging
-                        print(f"[{datetime.now()}] 🔍 Product: {symbol} (type: {contract_type})")
                     
                     # Filter for BTC/ETH options
                     is_option = contract_type in ['call_options', 'put_options']
@@ -86,34 +101,17 @@ class DeltaOptionsBot:
                 
                 print(f"[{datetime.now()}] ✅ Found {len(symbols)} options symbols")
                 
-                # Show what symbols we found
                 if symbols:
                     print(f"[{datetime.now()}] 📋 Sample symbols: {symbols[:5]}")
-                else:
-                    print(f"[{datetime.now()}] ⚠️ No options symbols found. Available products:")
-                    for product in products[:10]:  # Show first 10 products
-                        print(f"  - {product.get('symbol')} ({product.get('contract_type')})")
                 
                 return symbols
             else:
                 print(f"[{datetime.now()}] ❌ API Error: {response.status_code}")
-                print(f"[{datetime.now()}] 📝 Response: {response.text}")
                 return []
                 
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Error fetching symbols: {e}")
             return []
-
-    def extract_strike(self, symbol):
-        """Extract strike price from symbol"""
-        try:
-            parts = symbol.split('-')
-            for part in parts:
-                if part.isdigit():
-                    return int(part)
-            return 0
-        except:
-            return 0
 
     # ---------------------------
     # WebSocket Callbacks
@@ -125,7 +123,7 @@ class DeltaOptionsBot:
 
     def on_close(self, ws, close_status_code, close_msg):
         self.connected = False
-        print(f"[{datetime.now()}] 🔴 WebSocket closed - Code: {close_status_code}, Msg: {close_msg}")
+        print(f"[{datetime.now()}] 🔴 WebSocket closed")
         if self.should_reconnect:
             print(f"[{datetime.now()}] 🔄 Reconnecting in 10 seconds...")
             sleep(10)
@@ -142,7 +140,6 @@ class DeltaOptionsBot:
             
             self.message_count += 1
             
-            # Log first few messages and then periodically
             if self.message_count <= 10 or self.message_count % 50 == 0:
                 print(f"[{datetime.now()}] 📨 Message {self.message_count}: type={message_type}")
             
@@ -176,8 +173,8 @@ class DeltaOptionsBot:
                         'ask': best_ask_price
                     }
                     
-                    # Log progress
-                    if len(self.options_prices) % 20 == 0:
+                    # Log progress occasionally
+                    if len(self.options_prices) % 25 == 0:
                         print(f"[{datetime.now()}] 💰 Tracking {len(self.options_prices)} symbols with price data")
                     
                     # Check for arbitrage with rate limiting
@@ -190,29 +187,109 @@ class DeltaOptionsBot:
             print(f"[{datetime.now()}] ❌ Error processing l1_orderbook data: {e}")
 
     def check_arbitrage_opportunities(self):
-        """Check for arbitrage opportunities"""
+        """Check for arbitrage opportunities - FIXED LOGIC"""
         if len(self.options_prices) < 10:
             return
             
-        btc_options = []
-        eth_options = []
+        # Group options by asset and expiry first
+        options_by_expiry = {}
         
         for symbol, prices in self.options_prices.items():
-            option_data = {
-                'symbol': symbol,
-                'bid': prices['bid'],
-                'ask': prices['ask']
-            }
-            
-            if 'BTC' in symbol:
-                btc_options.append(option_data)
-            elif 'ETH' in symbol:
-                eth_options.append(option_data)
+            if 'BTC' in symbol or 'ETH' in symbol:
+                asset = 'BTC' if 'BTC' in symbol else 'ETH'
+                expiry = self.extract_expiry_from_symbol(symbol)
+                
+                if expiry not in options_by_expiry:
+                    options_by_expiry[expiry] = {}
+                if asset not in options_by_expiry[expiry]:
+                    options_by_expiry[expiry][asset] = []
+                
+                options_by_expiry[expiry][asset].append({
+                    'symbol': symbol,
+                    'bid': prices['bid'],
+                    'ask': prices['ask']
+                })
         
-        if btc_options:
-            self.check_arbitrage('BTC', btc_options)
-        if eth_options:
-            self.check_arbitrage('ETH', eth_options)
+        # Check arbitrage for each expiry separately
+        for expiry, assets in options_by_expiry.items():
+            for asset, options in assets.items():
+                if len(options) >= 4:  # Need at least 2 calls and 2 puts
+                    self.check_arbitrage_same_expiry(asset, expiry, options)
+
+    def check_arbitrage_same_expiry(self, asset, expiry, options):
+        """Check for arbitrage opportunities within the same expiry"""
+        # Group by strike price
+        strikes = {}
+        for option in options:
+            strike = self.extract_strike(option['symbol'])
+            if strike > 0:
+                if strike not in strikes:
+                    strikes[strike] = {'call': {}, 'put': {}}
+                
+                if 'C-' in option['symbol']:
+                    strikes[strike]['call'] = {
+                        'bid': option['bid'], 
+                        'ask': option['ask'],
+                        'symbol': option['symbol']
+                    }
+                elif 'P-' in option['symbol']:
+                    strikes[strike]['put'] = {
+                        'bid': option['bid'], 
+                        'ask': option['ask'],
+                        'symbol': option['symbol']
+                    }
+        
+        # Sort strikes and only compare adjacent strikes
+        sorted_strikes = sorted(strikes.keys())
+        
+        if len(sorted_strikes) < 2:
+            return
+        
+        alerts = []
+        
+        # Check adjacent strikes only (within same expiry)
+        for i in range(len(sorted_strikes) - 1):
+            strike1 = sorted_strikes[i]
+            strike2 = sorted_strikes[i + 1]
+            
+            # Verify both strikes have the same expiry
+            strike1_expiry = self.extract_expiry_from_symbol(strikes[strike1]['call'].get('symbol', '')) if strikes[strike1]['call'] else None
+            strike2_expiry = self.extract_expiry_from_symbol(strikes[strike2]['call'].get('symbol', '')) if strikes[strike2]['call'] else None
+            
+            if strike1_expiry != strike2_expiry:
+                continue  # Skip if different expiries
+            
+            # CALL arbitrage: Buy lower strike CALL, sell higher strike CALL
+            call1_ask = strikes[strike1]['call'].get('ask', 0)
+            call2_bid = strikes[strike2]['call'].get('bid', 0)
+            
+            if call1_ask > 0 and call2_bid > 0:
+                call_diff = call1_ask - call2_bid
+                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
+                    alert_key = f"{asset}_CALL_{strike1}_{strike2}_{expiry}"
+                    if self.can_alert(alert_key):
+                        profit = abs(call_diff)
+                        alerts.append(f"🔷 {asset} CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
+            
+            # PUT arbitrage: Sell lower strike PUT, buy higher strike PUT
+            put1_bid = strikes[strike1]['put'].get('bid', 0)
+            put2_ask = strikes[strike2]['put'].get('ask', 0)
+            
+            if put1_bid > 0 and put2_ask > 0:
+                put_diff = put2_ask - put1_bid
+                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
+                    alert_key = f"{asset}_PUT_{strike1}_{strike2}_{expiry}"
+                    if self.can_alert(alert_key):
+                        profit = abs(put_diff)
+                        alerts.append(f"🟣 {asset} PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
+        
+        # Send alerts if any found
+        if alerts:
+            message = f"🚨 *{asset} {expiry} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
+            message += f"\n\n_Expiry: {expiry}_"
+            message += f"\n_Time: {datetime.now().strftime('%H:%M:%S')}_"
+            self.send_telegram(message)
+            print(f"[{datetime.now()}] ✅ Sent {len(alerts)} {asset} arbitrage alerts for expiry {expiry}")
 
     def subscribe_to_options(self):
         """Subscribe to available options"""
@@ -220,11 +297,15 @@ class DeltaOptionsBot:
         
         if not symbols:
             print(f"[{datetime.now()}] ⚠️ No live options symbols found from API")
-            print(f"[{datetime.now()}] 🔄 Using spot symbols for testing...")
-            # Subscribe to some spot symbols for testing
+            print(f"[{datetime.now()}] 🔄 Using common symbols for testing...")
+            # Use common symbols that likely exist
             symbols = [
-                "BTCUSDT", "ETHUSDT", "BTC-17OCT25-60000-C", "BTC-17OCT25-60000-P",
-                "ETH-17OCT25-3000-C", "ETH-17OCT25-3000-P"
+                "BTCUSDT", "ETHUSDT", 
+                "C-BTC-60000-171025", "P-BTC-60000-171025",
+                "C-BTC-61000-171025", "P-BTC-61000-171025",
+                "C-BTC-62000-171025", "P-BTC-62000-171025",
+                "C-ETH-3000-171025", "P-ETH-3000-171025",
+                "C-ETH-3100-171025", "P-ETH-3100-171025"
             ]
         
         self.active_symbols = symbols
@@ -244,15 +325,14 @@ class DeltaOptionsBot:
             
             self.ws.send(json.dumps(payload))
             print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} symbols")
-            print(f"[{datetime.now()}] 📋 Symbols: {symbols}")
             
-            # Test Telegram with simple message
+            # Test Telegram
             self.test_telegram()
         else:
             print(f"[{datetime.now()}] ❌ No symbols available to subscribe")
 
     def test_telegram(self):
-        """Test Telegram connection with simple message"""
+        """Test Telegram connection"""
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             print(f"[{datetime.now()}] ⚠️ Telegram credentials not configured")
             return
@@ -261,71 +341,17 @@ class DeltaOptionsBot:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             resp = requests.post(url, data={
                 "chat_id": TELEGRAM_CHAT_ID, 
-                "text": "🤖 Bot connected to Delta Exchange", 
-                "parse_mode": "Markdown"
+                "text": "🤖 Arbitrage Bot Connected - Fixed same-expiry logic", 
             })
             if resp.status_code == 200:
                 print(f"[{datetime.now()}] 📱 Telegram test message sent")
             else:
-                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}: {resp.text}")
+                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}")
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Telegram test failed: {e}")
 
-    def check_arbitrage(self, asset, options):
-        """Check for arbitrage opportunities"""
-        strikes = {}
-        for option in options:
-            strike = self.extract_strike(option['symbol'])
-            if strike > 0:
-                if strike not in strikes:
-                    strikes[strike] = {'call': {}, 'put': {}}
-                
-                if 'C' in option['symbol']:
-                    strikes[strike]['call'] = {'bid': option['bid'], 'ask': option['ask']}
-                elif 'P' in option['symbol']:
-                    strikes[strike]['put'] = {'bid': option['bid'], 'ask': option['ask']}
-        
-        sorted_strikes = sorted(strikes.keys())
-        
-        if len(sorted_strikes) < 2:
-            return
-        
-        alerts = []
-        for i in range(len(sorted_strikes) - 1):
-            strike1 = sorted_strikes[i]
-            strike2 = sorted_strikes[i + 1]
-            
-            # CALL arbitrage
-            call1_ask = strikes[strike1]['call'].get('ask', 0)
-            call2_bid = strikes[strike2]['call'].get('bid', 0)
-            
-            if call1_ask > 0 and call2_bid > 0:
-                call_diff = call1_ask - call2_bid
-                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
-                    alert_key = f"{asset}_CALL_{strike1}_{strike2}"
-                    if self.can_alert(alert_key):
-                        profit = abs(call_diff)
-                        alerts.append(f"🔷 CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
-            
-            # PUT arbitrage
-            put1_bid = strikes[strike1]['put'].get('bid', 0)
-            put2_ask = strikes[strike2]['put'].get('ask', 0)
-            
-            if put1_bid > 0 and put2_ask > 0:
-                put_diff = put2_ask - put1_bid
-                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
-                    alert_key = f"{asset}_PUT_{strike1}_{strike2}"
-                    if self.can_alert(alert_key):
-                        profit = abs(put_diff)
-                        alerts.append(f"🟣 PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
-        
-        if alerts:
-            message = f"🚨 *{asset} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
-            message += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S')}_"
-            self.send_telegram(message)
-            print(f"[{datetime.now()}] ✅ Sent {len(alerts)} {asset} arbitrage alerts")
-
     def can_alert(self, alert_key):
+        """Check if we can send alert (cooldown)"""
         now = datetime.now().timestamp()
         last_time = self.last_alert_time.get(alert_key, 0)
         if now - last_time >= ALERT_COOLDOWN:
@@ -334,6 +360,7 @@ class DeltaOptionsBot:
         return False
 
     def send_telegram(self, message):
+        """Send Telegram message"""
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             return
         try:
@@ -391,7 +418,7 @@ def home():
     <p>Messages Received: {bot.message_count}</p>
     <p>Current Prices: {len(bot.options_prices)} symbols</p>
     <p>Active Symbols: {len(bot.active_symbols)}</p>
-    <p>Expiry: {bot.current_expiry}</p>
+    <p>Current Expiry: {bot.current_expiry}</p>
     <p>Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     <p><a href="/debug">Debug Info</a> | <a href="/health">Health</a></p>
     """
@@ -404,21 +431,34 @@ def health():
         "messages_received": bot.message_count,
         "symbols_tracked": len(bot.options_prices),
         "active_symbols": len(bot.active_symbols),
-        "expiry": bot.current_expiry
+        "current_expiry": bot.current_expiry
     }, 200
 
 @app.route('/debug')
 def debug():
     """Debug endpoint"""
+    # Group symbols by expiry for debugging
+    expiries = {}
+    for symbol in bot.options_prices.keys():
+        expiry = bot.extract_expiry_from_symbol(symbol)
+        if expiry:
+            if expiry not in expiries:
+                expiries[expiry] = []
+            expiries[expiry].append(symbol)
+    
     sample_prices = dict(list(bot.options_prices.items())[:3])
     return {
         "connected": bot.connected,
         "messages_received": bot.message_count,
         "symbols_tracked": len(bot.options_prices),
         "active_symbols_count": len(bot.active_symbols),
-        "sample_prices": sample_prices,
-        "active_symbols_sample": bot.active_symbols[:5]
+        "symbols_by_expiry": expiries,
+        "sample_prices": sample_prices
     }
+
+@app.route('/ping')
+def ping():
+    return "pong", 200
 
 # -------------------------------
 # Start Bot
@@ -432,7 +472,8 @@ def start_bot():
 
 if __name__ == "__main__":
     print("="*50)
-    print("Delta Options Arbitrage Bot - DEBUG VERSION")
+    print("Delta Options Arbitrage Bot - SAME EXPIRY FIX")
+    print("Only compares adjacent strikes within same expiry")
     print("="*50)
     
     start_bot()
