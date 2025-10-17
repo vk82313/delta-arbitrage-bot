@@ -25,13 +25,14 @@ ALERT_COOLDOWN = 60
 # -------------------------------
 class DeltaOptionsBot:
     def __init__(self):
-        self.websocket_url = "wss://socket.india.delta.exchange"
+        self.websocket_url = "wss://socket.delta.exchange"  # Using main domain
         self.ws = None
         self.last_alert_time = {}
         self.options_prices = {}
         self.connected = False
         self.current_expiry = self.get_current_expiry()
         self.active_symbols = []
+        self.should_reconnect = True
 
     def get_current_expiry(self):
         """Get current expiry in DDMMYY format"""
@@ -50,8 +51,8 @@ class DeltaOptionsBot:
     def get_all_options_symbols(self):
         """Fetch ALL available BTC/ETH options symbols"""
         try:
-            print(f"[{datetime.now()}] 🔍 Fetching options symbols...")
-            url = "https://api.india.delta.exchange/v2/products"
+            print(f"[{datetime.now()}] 🔍 Fetching options symbols from Delta API...")
+            url = "https://api.delta.exchange/v2/products"
             response = requests.get(url, timeout=10)
             
             if response.status_code == 200:
@@ -67,7 +68,7 @@ class DeltaOptionsBot:
                     is_current_expiry = self.current_expiry in symbol
                     
                     if is_option and is_current_expiry:
-                        if symbol.startswith(('C-BTC-', 'P-BTC-', 'C-ETH-', 'P-ETH-')):
+                        if any(asset in symbol for asset in ['BTC', 'ETH']):
                             symbols.append(symbol)
                 
                 # Remove duplicates and sort
@@ -75,14 +76,18 @@ class DeltaOptionsBot:
                 
                 print(f"[{datetime.now()}] ✅ Found {len(symbols)} options symbols")
                 
-                # Show strike ranges
-                btc_strikes = sorted(list(set([self.extract_strike(sym) for sym in symbols if 'BTC' in sym])))
-                eth_strikes = sorted(list(set([self.extract_strike(sym) for sym in symbols if 'ETH' in sym])))
-                
-                if btc_strikes:
-                    print(f"[{datetime.now()}] 📊 BTC Strikes: {btc_strikes[0]:,} to {btc_strikes[-1]:,} ({len(btc_strikes)} strikes)")
-                if eth_strikes:
-                    print(f"[{datetime.now()}] 📊 ETH Strikes: {eth_strikes[0]:,} to {eth_strikes[-1]:,} ({len(eth_strikes)} strikes)")
+                if symbols:
+                    # Show strike ranges
+                    btc_symbols = [s for s in symbols if 'BTC' in s]
+                    eth_symbols = [s for s in symbols if 'ETH' in s]
+                    
+                    btc_strikes = sorted(list(set([self.extract_strike(sym) for sym in btc_symbols])))
+                    eth_strikes = sorted(list(set([self.extract_strike(sym) for sym in eth_symbols])))
+                    
+                    if btc_strikes:
+                        print(f"[{datetime.now()}] 📊 BTC Strikes: {btc_strikes[0]:,} to {btc_strikes[-1]:,} ({len(btc_strikes)} strikes)")
+                    if eth_strikes:
+                        print(f"[{datetime.now()}] 📊 ETH Strikes: {eth_strikes[0]:,} to {eth_strikes[-1]:,} ({len(eth_strikes)} strikes)")
                 
                 return symbols
             else:
@@ -124,9 +129,11 @@ class DeltaOptionsBot:
 
     def on_close(self, ws, close_status_code, close_msg):
         self.connected = False
-        print(f"[{datetime.now()}] 🔴 WebSocket closed - reconnecting in 10s...")
-        sleep(10)
-        self.connect()
+        print(f"[{datetime.now()}] 🔴 WebSocket closed")
+        if self.should_reconnect:
+            print(f"[{datetime.now()}] 🔄 Reconnecting in 10 seconds...")
+            sleep(10)
+            self.connect()
 
     def on_error(self, ws, error):
         print(f"[{datetime.now()}] ❌ WebSocket error: {error}")
@@ -142,7 +149,7 @@ class DeltaOptionsBot:
             elif message_type == 'success':
                 print(f"[{datetime.now()}] ✅ {message_json.get('message', 'Success')}")
             elif message_type == 'error':
-                print(f"[{datetime.now()}] ❌ Error: {message_json}")
+                print(f"[{datetime.now()}] ❌ Subscription error: {message_json}")
                 
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Message processing error: {e}")
@@ -152,28 +159,31 @@ class DeltaOptionsBot:
         symbols = self.get_all_options_symbols()
         
         if not symbols:
-            print(f"[{datetime.now()}] ⚠️ No symbols found, using fallback...")
+            print(f"[{datetime.now()}] ⚠️ No symbols found from API, using fallback...")
             symbols = self.get_fallback_symbols()
         
         self.active_symbols = symbols
         
-        payload = {
-            "type": "subscribe",
-            "payload": {
-                "channels": [
-                    {
-                        "name": "l1ob_c",
-                        "symbols": symbols
-                    }
-                ]
+        if symbols:
+            payload = {
+                "type": "subscribe",
+                "payload": {
+                    "channels": [
+                        {
+                            "name": "v2/ticker",  # Using v2/ticker instead of l1ob_c
+                            "symbols": symbols
+                        }
+                    ]
+                }
             }
-        }
-        
-        self.ws.send(json.dumps(payload))
-        print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} options symbols")
-        
-        # Send connection alert
-        self.send_telegram(f"🔗 *Bot Connected* 🔗\n\n✅ Connected to Delta Exchange\n📅 Expiry: {self.current_expiry}\n📊 Monitoring: {len(symbols)} symbols\n\nBot is now live! 🚀")
+            
+            self.ws.send(json.dumps(payload))
+            print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} options symbols")
+            
+            # Send connection alert
+            self.send_telegram(f"🔗 *Bot Connected* 🔗\n\n✅ Connected to Delta Exchange\n📅 Expiry: {self.current_expiry}\n📊 Monitoring: {len(symbols)} symbols\n\nBot is now live! 🚀")
+        else:
+            print(f"[{datetime.now()}] ❌ No symbols available to subscribe")
 
     def get_fallback_symbols(self):
         """Fallback symbols if API fails"""
@@ -184,13 +194,14 @@ class DeltaOptionsBot:
         eth_strikes = [2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500]
         
         for strike in btc_strikes:
-            symbols.append(f"C-BTC-{self.current_expiry}-{strike}")
-            symbols.append(f"P-BTC-{self.current_expiry}-{strike}")
+            symbols.append(f"BTC-{self.current_expiry}-{strike}-C")
+            symbols.append(f"BTC-{self.current_expiry}-{strike}-P")
         
         for strike in eth_strikes:
-            symbols.append(f"C-ETH-{self.current_expiry}-{strike}")
-            symbols.append(f"P-ETH-{self.current_expiry}-{strike}")
+            symbols.append(f"ETH-{self.current_expiry}-{strike}-C")
+            symbols.append(f"ETH-{self.current_expiry}-{strike}-P")
         
+        print(f"[{datetime.now()}] 🔄 Using {len(symbols)} fallback symbols")
         return symbols
 
     def process_bid_ask_data(self, message):
@@ -216,13 +227,13 @@ class DeltaOptionsBot:
                     self.options_prices[symbol] = {'bid': best_bid, 'ask': best_ask}
                     
                     # Separate BTC and ETH options
-                    if symbol.startswith('C-BTC-') or symbol.startswith('P-BTC-'):
+                    if 'BTC' in symbol:
                         btc_options.append({
                             'symbol': symbol,
                             'bid': best_bid,
                             'ask': best_ask
                         })
-                    elif symbol.startswith('C-ETH-') or symbol.startswith('P-ETH-'):
+                    elif 'ETH' in symbol:
                         eth_options.append({
                             'symbol': symbol,
                             'bid': best_bid,
@@ -245,9 +256,9 @@ class DeltaOptionsBot:
                 if strike not in strikes:
                     strikes[strike] = {'call': {}, 'put': {}}
                 
-                if 'C-' in option['symbol']:
+                if 'C' in option['symbol']:
                     strikes[strike]['call'] = {'bid': option['bid'], 'ask': option['ask']}
-                elif 'P-' in option['symbol']:
+                elif 'P' in option['symbol']:
                     strikes[strike]['put'] = {'bid': option['bid'], 'ask': option['ask']}
         
         # Sort strikes
@@ -304,6 +315,7 @@ class DeltaOptionsBot:
 
     def send_telegram(self, message):
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print(f"[{datetime.now()}] ⚠️ Telegram credentials not set")
             return
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -314,10 +326,14 @@ class DeltaOptionsBot:
             })
             if resp.status_code == 200:
                 print(f"[{datetime.now()}] 📱 Telegram alert sent")
+            else:
+                print(f"[{datetime.now()}] ❌ Telegram API error: {resp.status_code}")
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Telegram error: {e}")
+            print(f"[{datetime.now()}] ❌ Telegram send error: {e}")
 
     def connect(self):
+        """Connect to WebSocket - runs in its own thread"""
+        print(f"[{datetime.now()}] 🌐 Connecting to Delta WebSocket...")
         self.ws = websocket.WebSocketApp(
             self.websocket_url,
             on_open=self.on_open,
@@ -328,17 +344,20 @@ class DeltaOptionsBot:
         self.ws.run_forever()
 
     def start(self):
+        """Start the bot in a separate thread"""
         def run_bot():
             try:
                 self.connect()
             except Exception as e:
-                print(f"[{datetime.now()}] ❌ Bot error: {e}")
-                sleep(10)
-                self.start()
+                print(f"[{datetime.now()}] ❌ Bot connection error: {e}")
+                if self.should_reconnect:
+                    sleep(10)
+                    self.start()  # Restart
         
         bot_thread = threading.Thread(target=run_bot)
-        bot_thread.daemon = True
+        bot_thread.daemon = True  # Thread will exit when main thread exits
         bot_thread.start()
+        print(f"[{datetime.now()}] ✅ Bot thread started")
 
 # -------------------------------
 # Flask Routes
@@ -352,27 +371,52 @@ def home():
     <h1>Delta Options Arbitrage Bot</h1>
     <p>Status: {status}</p>
     <p>Monitoring: BTC & ETH Options</p>
-    <p>Symbols: {len(bot.options_prices)}</p>
+    <p>Current Prices: {len(bot.options_prices)} symbols</p>
     <p>Active Symbols: {len(bot.active_symbols)}</p>
+    <p>Expiry: {bot.current_expiry}</p>
     <p>Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     """
 
 @app.route('/health')
 def health():
-    return {"status": "healthy", "connected": bot.connected, "symbols": len(bot.options_prices)}, 200
+    return {
+        "status": "healthy", 
+        "bot_connected": bot.connected, 
+        "symbols_tracked": len(bot.options_prices),
+        "active_symbols": len(bot.active_symbols),
+        "expiry": bot.current_expiry
+    }, 200
+
+@app.route('/ping')
+def ping():
+    return "pong", 200
 
 # -------------------------------
-# Main
+# Main Execution
 # -------------------------------
-if __name__ == "__main__":
-    print("="*50)
+def initialize_app():
+    """Initialize the application"""
+    print("=" * 50)
     print("Delta Options Arbitrage Bot")
-    print("="*50)
+    print("=" * 50)
     
-    # Start the bot
+    # Start the bot in background
+    print(f"[{datetime.now()}] 🤖 Starting Delta Options Bot...")
     bot.start()
     
-    # Start Flask app
+    # Give bot a moment to start
+    sleep(3)
+
+if __name__ == "__main__":
+    # Initialize the app
+    initialize_app()
+    
+    # Start Flask server
     port = int(os.environ.get("PORT", 10000))
-    print(f"[{datetime.now()}] 🚀 Starting web server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(f"[{datetime.now()}] 🚀 Starting Flask server on port {port}")
+    
+    # Start Flask without reloader to avoid duplicate threads
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+else:
+    # For Render deployment (gunicorn)
+    initialize_app()
