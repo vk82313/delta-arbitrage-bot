@@ -249,3 +249,29 @@ if __name__ == "__main__":
         print("\nStopping bot...")
     except Exception as e:
         print(f"Error: {e}")
+
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+PORT = int(os.environ.get("PORT", 10000))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running successfully!")
+
+def start_server():
+    server = HTTPServer(("", PORT), Handler)
+    print(f"✅ Dummy web server running on port {PORT}")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    # Start dummy web server
+    threading.Thread(target=start_server, daemon=True).start()
+
+    # Start your WebSocket bot
+    client = DeltaOptionsBidAsk()
+    client.connect()
+
