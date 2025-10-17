@@ -1,147 +1,251 @@
+import websocket
+import json
+import brotli
+import base64
 import requests
 import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+from time import sleep
 
-# ---------------- Configuration ---------------- #
+# -------------------------------
+# Telegram Configuration
+# -------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-BASE_URL = "https://api.india.delta.exchange/v2"
-FETCH_INTERVAL = 1  # seconds
+# Minimum Δ threshold for alerts
+DELTA_THRESHOLD = {"BTC": 2, "ETH": 0.16}
 
-# Minimum arbitrage difference
-MIN_DIFF = {"BTC": 2, "ETH": 0.16}
+# Minimum time between alerts per strike in seconds
+ALERT_COOLDOWN = 60
 
-# Store last alerts to prevent spamming
-last_alert = {}
+# -------------------------------
+# Delta WebSocket Client
+# -------------------------------
+class DeltaOptionsBot:
+    def __init__(self):
+        self.ws_url = "wss://socket.india.delta.exchange"
+        self.ws = None
+        self.last_alert_time = {}  # Track last alert per strike
+        self.options_prices = {}   # Current bid/ask
+        self.assets = ["BTC", "ETH"]
 
-# ---------------- Utility Functions ---------------- #
+    # ---------------------------
+    # WebSocket Callbacks
+    # ---------------------------
+    def on_open(self, ws):
+        print(f"[{datetime.now()}] Connected to Delta Exchange WebSocket")
+        self.subscribe_all_options()
 
-def send_telegram_alert(message):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        requests.post(url, json=payload, timeout=5)
-        print(f"✅ Telegram alert sent")
-    except Exception as e:
-        print(f"❌ Telegram send error: {e}")
+    def on_close(self, ws, close_status_code, close_msg):
+        print(f"[{datetime.now()}] WebSocket closed: {close_status_code} - {close_msg}")
 
-def get_current_expiry():
-    now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    if now.hour > 17 or (now.hour == 17 and now.minute >= 30):
-        expiry_date = now + timedelta(days=1)
-    else:
-        expiry_date = now
-    return expiry_date.strftime("%d%m%y")
+    def on_error(self, ws, error):
+        print(f"[{datetime.now()}] WebSocket error: {error}")
 
-def fetch_products():
-    try:
-        res = requests.get(BASE_URL + "/products", timeout=10)
-        data = res.json().get("result", [])
-        return data
-    except Exception as e:
-        print(f"❌ fetch_products error: {e}")
-        return []
-
-def fetch_tickers():
-    try:
-        res = requests.get(BASE_URL + "/tickers", timeout=10)
-        data = res.json().get("result", [])
-        return data
-    except Exception as e:
-        print(f"❌ fetch_tickers error: {e}")
-        return []
-
-def extract_strike(symbol):
-    parts = symbol.split("-")
-    for part in parts:
-        if part.isdigit():
-            return int(part)
-    return None
-
-# ---------------- Core Logic ---------------- #
-
-def build_options_map(asset, expiry):
-    products = fetch_products()
-    tickers = fetch_tickers()
-
-    ticker_map = {t['symbol']: t for t in tickers if 'symbol' in t}
-
-    options_map = {}
-    for p in products:
-        symbol = p.get('symbol')
-        if not symbol or asset not in symbol or expiry not in symbol:
-            continue
-        strike = extract_strike(symbol)
-        if strike is None:
-            continue
-        if strike not in options_map:
-            options_map[strike] = {'call': {}, 'put': {}}
-
-        ticker = ticker_map.get(symbol, {})
-        bid = ticker.get('best_bid_price') or ticker.get('bid') or 0
-        ask = ticker.get('best_ask_price') or ticker.get('ask') or 0
-
-        if symbol.endswith("-C"):
-            options_map[strike]['call'] = {'bid': float(bid), 'ask': float(ask)}
-        elif symbol.endswith("-P"):
-            options_map[strike]['put'] = {'bid': float(bid), 'ask': float(ask)}
-    return options_map
-
-def check_arbitrage(asset, options_map):
-    strikes = sorted(options_map.keys())
-    alerts = []
-
-    for i in range(len(strikes) - 1):
-        s1 = strikes[i]
-        s2 = strikes[i+1]
-
-        # CALL arbitrage: ask - next bid < 0
-        c1_ask = options_map[s1]['call'].get('ask', 0)
-        c2_bid = options_map[s2]['call'].get('bid', 0)
-        if c1_ask and c2_bid and (c1_ask - c2_bid) < 0 and abs(c1_ask - c2_bid) >= MIN_DIFF[asset]:
-            key = f"{asset}_CALL_{s1}_{s2}"
-            now = time.time()
-            if now - last_alert.get(key, 0) >= 60:
-                alerts.append(f"🔷 CALL {s1} Ask: {c1_ask:.2f} vs {s2} Bid: {c2_bid:.2f} → Profit: {abs(c1_ask - c2_bid):.2f}")
-                last_alert[key] = now
-
-        # PUT arbitrage: next ask - bid < 0
-        p1_bid = options_map[s1]['put'].get('bid', 0)
-        p2_ask = options_map[s2]['put'].get('ask', 0)
-        if p1_bid and p2_ask and (p2_ask - p1_bid) < 0 and abs(p2_ask - p1_bid) >= MIN_DIFF[asset]:
-            key = f"{asset}_PUT_{s1}_{s2}"
-            now = time.time()
-            if now - last_alert.get(key, 0) >= 60:
-                alerts.append(f"🟣 PUT {s1} Bid: {p1_bid:.2f} vs {s2} Ask: {p2_ask:.2f} → Profit: {abs(p2_ask - p1_bid):.2f}")
-                last_alert[key] = now
-
-    if alerts:
-        msg = f"🚨 *{asset} OPTIONS ARBITRAGE ALERT* 🚨\nTime: {datetime.now().strftime('%H:%M:%S')}\n\n" + "\n".join(alerts)
-        send_telegram_alert(msg)
-        print(f"✅ Sent {len(alerts)} {asset} alerts")
-
-# ---------------- Main Loop ---------------- #
-
-def main():
-    print("🚀 Starting Delta Options Arbitrage Bot (1-second fetch)...")
-    expiry = get_current_expiry()
-    print(f"📅 Using expiry: {expiry}")
-
-    while True:
+    def on_message(self, ws, message):
         try:
-            for asset in ["BTC", "ETH"]:
-                options_map = build_options_map(asset, expiry)
-                check_arbitrage(asset, options_map)
-            time.sleep(FETCH_INTERVAL)
+            msg = json.loads(message)
+            if msg.get("type") == "l1ob_c":
+                self.process_bid_ask(msg)
+            elif msg.get("type") in ["success", "error"]:
+                print(f"[{datetime.now()}] {msg.get('type').upper()}: {msg.get('message')}")
         except Exception as e:
-            print(f"❌ Main loop error: {e}")
-            time.sleep(2)
+            print(f"[{datetime.now()}] Message processing error: {e}")
 
+    # ---------------------------
+    # Subscribe to current options
+    # ---------------------------
+    def subscribe_all_options(self):
+        expiries = self.get_current_expiries()
+        if not expiries:
+            print(f"[{datetime.now()}] No expiries found, retrying in 10s...")
+            sleep(10)
+            expiries = self.get_current_expiries()
+
+        payload = {
+            "type": "subscribe",
+            "payload": {
+                "channels": [{"name": "l1ob_c", "symbols": expiries}]
+            }
+        }
+        self.ws.send(json.dumps(payload))
+        print(f"[{datetime.now()}] Subscribed to options: {expiries}")
+
+    # ---------------------------
+    # Fetch current expiries dynamically
+    # ---------------------------
+    def get_current_expiries(self):
+        expiries = []
+        try:
+            resp = requests.get("https://api.india.delta.exchange/v2/products").json()
+            products = resp.get("result", [])
+            for p in products:
+                sym = p.get("symbol", "")
+                underlying = p.get("underlying_asset", {}).get("symbol", "")
+                ctype = str(p.get("contract_type", "")).lower()
+                if ctype in ["call", "put", "option"]:
+                    for asset in self.assets:
+                        if asset in sym or asset in underlying:
+                            expiries.append(sym)
+        except Exception as e:
+            print(f"[{datetime.now()}] Error fetching expiries: {e}")
+        return expiries
+
+    # ---------------------------
+    # Brotli Decompression
+    # ---------------------------
+    def decompress_brotli(self, compressed):
+        try:
+            decoded = base64.b64decode(compressed)
+            decompressed = brotli.decompress(decoded)
+            return json.loads(decompressed.decode("utf-8"))
+        except Exception as e:
+            print(f"[{datetime.now()}] Decompression error: {e}")
+            return []
+
+    # ---------------------------
+    # Process bid/ask updates
+    # ---------------------------
+    def process_bid_ask(self, msg):
+        data = self.decompress_brotli(msg.get("c", ""))
+        if not data:
+            return
+
+        asset_options = {asset: [] for asset in self.assets}
+
+        # Update current prices
+        for option in data:
+            sym = option.get("s")
+            d = option.get("d", [])
+            if len(d) < 4:
+                continue
+            best_ask = float(d[0]) if d[0] else None
+            best_bid = float(d[2]) if d[2] else None
+            self.options_prices[sym] = {"bid": best_bid, "ask": best_ask}
+
+            for asset in self.assets:
+                if sym.startswith(("C-"+asset, "P-"+asset)):
+                    asset_options[asset].append({
+                        "symbol": sym,
+                        "bid": best_bid,
+                        "ask": best_ask
+                    })
+
+        # Generate and send alerts per asset
+        for asset in self.assets:
+            self.generate_alert(asset, asset_options[asset])
+
+    # ---------------------------
+    # Generate Telegram Alerts
+    # ---------------------------
+    def generate_alert(self, asset, options):
+        if not options or len(options) < 2:
+            return
+
+        options_sorted = sorted(options, key=lambda x: x["symbol"])
+        alerts = []
+
+        for i in range(len(options_sorted)-1):
+            curr = options_sorted[i]
+            nxt = options_sorted[i+1]
+            delta_threshold = DELTA_THRESHOLD[asset]
+
+            # Call option alert logic
+            if curr["symbol"].startswith("C-"+asset):
+                if curr["ask"] is not None and nxt["bid"] is not None:
+                    delta = curr["ask"] - nxt["bid"]
+                    if delta >= delta_threshold:
+                        key = curr["symbol"]
+                        now = datetime.now().timestamp()
+                        last_time = self.last_alert_time.get(key, 0)
+                        if now - last_time >= ALERT_COOLDOWN:
+                            alerts.append({
+                                "type": "CALL",
+                                "strike": curr["symbol"].split("-")[2],
+                                "next_strike": nxt["symbol"].split("-")[2],
+                                "ask": curr["ask"],
+                                "next_bid": nxt["bid"],
+                                "delta": delta
+                            })
+                            self.last_alert_time[key] = now
+
+            # Put option alert logic
+            if curr["symbol"].startswith("P-"+asset):
+                if curr["bid"] is not None and nxt["ask"] is not None:
+                    delta = curr["bid"] - nxt["ask"]
+                    if delta >= delta_threshold:
+                        key = curr["symbol"]
+                        now = datetime.now().timestamp()
+                        last_time = self.last_alert_time.get(key, 0)
+                        if now - last_time >= ALERT_COOLDOWN:
+                            alerts.append({
+                                "type": "PUT",
+                                "strike": curr["symbol"].split("-")[2],
+                                "next_strike": nxt["symbol"].split("-")[2],
+                                "bid": curr["bid"],
+                                "next_ask": nxt["ask"],
+                                "delta": delta
+                            })
+                            self.last_alert_time[key] = now
+
+        # Sort alerts by delta descending
+        alerts = sorted(alerts, key=lambda x: x["delta"], reverse=True)
+
+        # Send message if any alerts
+        if alerts:
+            msg_lines = [f"*{asset} OPTIONS ALERT*\nUpdated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"]
+            for a in alerts:
+                if a["type"] == "CALL":
+                    msg_lines.append(f'CALL ⚡\nStrike: {a["strike"]} → Next: {a["next_strike"]}\nAsk: {a["ask"]} | Next Bid: {a["next_bid"]}\nΔ: {a["delta"]:.2f}\n')
+                else:
+                    msg_lines.append(f'PUT ⚡\nStrike: {a["strike"]} → Next: {a["next_strike"]}\nBid: {a["bid"]} | Next Ask: {a["next_ask"]}\nΔ: {a["delta"]:.2f}\n')
+
+            message = "\n".join(msg_lines)
+            self.send_telegram(message)
+
+    # ---------------------------
+    # Send Telegram
+    # ---------------------------
+    def send_telegram(self, message):
+        if not TELEGRA_MBOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print(f"[{datetime.now()}] Telegram not configured.")
+            return
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            resp = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+            if resp.status_code == 200:
+                print(f"[{datetime.now()}] Telegram alert sent.")
+            else:
+                print(f"[{datetime.now()}] Telegram error: {resp.text}")
+        except Exception as e:
+            print(f"[{datetime.now()}] Telegram send error: {e}")
+
+    # ---------------------------
+    # Connect WebSocket
+    # ---------------------------
+    def connect(self):
+        self.ws = websocket.WebSocketApp(
+            self.ws_url,
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+        self.ws.run_forever()
+
+
+# -------------------------------
+# Main
+# -------------------------------
 if __name__ == "__main__":
-    main()
+    print("="*50)
+    print("Delta Options Bid/Ask Monitor with Telegram Alerts")
+    print("="*50)
+    bot = DeltaOptionsBot()
+    try:
+        bot.connect()
+    except KeyboardInterrupt:
+        print("\nStopping bot...")
+    except Exception as e:
+        print(f"Error: {e}")
