@@ -17,16 +17,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DELTA_THRESHOLD = {"BTC": 2, "ETH": 0.16}
 ALERT_COOLDOWN = 60
-# Rate limiting to avoid excessive processing
-LAST_PROCESS_TIME = 0
 PROCESS_INTERVAL = 2  # Process every 2 seconds
 
 # -------------------------------
-# Delta WebSocket Client - FULLY CORRECTED
+# Delta WebSocket Client - CORRECTED
 # -------------------------------
 class DeltaOptionsBot:
     def __init__(self):
-        # ✅ CORRECT WebSocket URL
         self.websocket_url = "wss://socket.india.delta.exchange"
         self.ws = None
         self.last_alert_time = {}
@@ -36,44 +33,52 @@ class DeltaOptionsBot:
         self.active_symbols = []
         self.should_reconnect = True
         self.last_arbitrage_check = 0
+        self.message_count = 0
 
     def get_current_expiry(self):
         """Get current expiry in DDMMYY format"""
         now = datetime.now(timezone.utc)
         ist_now = now + timedelta(hours=5, minutes=30)
         
-        if ist_now.hour >= 17 and ist_now.minute >= 30:
-            expiry_date = ist_now + timedelta(days=1)
-        else:
-            expiry_date = ist_now
-        
-        expiry_str = expiry_date.strftime("%d%m%y")
+        # For testing, let's try multiple expiry formats
+        expiry_str = ist_now.strftime("%d%m%y")
         print(f"[{datetime.now()}] 📅 Using expiry: {expiry_str}")
         return expiry_str
 
     def get_all_options_symbols(self):
-        """Fetch ALL available BTC/ETH options symbols"""
+        """Fetch ALL available BTC/ETH options symbols - CORRECTED"""
         try:
             print(f"[{datetime.now()}] 🔍 Fetching options symbols from Delta API...")
-            # ✅ CORRECT API endpoint
+            
+            # ✅ CORRECT: Use contract_types parameter to filter options
             url = "https://api.india.delta.exchange/v2/products"
-            response = requests.get(url, timeout=10)
+            params = {
+                'contract_types': 'call_options,put_options',
+                'states': 'live'
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
             
             if response.status_code == 200:
                 products = response.json().get('result', [])
                 symbols = []
                 
+                print(f"[{datetime.now()}] 📊 Total products from API: {len(products)}")
+                
                 for product in products:
                     symbol = product.get('symbol', '')
-                    contract_type = str(product.get('contract_type', '')).lower()
-                    underlying_asset = product.get('underlying_asset', '')
+                    contract_type = product.get('contract_type', '')
+                    underlying_asset = product.get('underlying_asset', {})
                     
-                    # Filter for BTC/ETH options for current expiry
-                    is_option = any(opt in contract_type for opt in ['call', 'put', 'option'])
-                    is_current_expiry = self.current_expiry in symbol
-                    is_btc_eth = underlying_asset in ['BTC', 'ETH']
+                    # Debug: Print some product info
+                    if len(symbols) < 5:  # Print first 5 for debugging
+                        print(f"[{datetime.now()}] 🔍 Product: {symbol} (type: {contract_type})")
                     
-                    if is_option and is_current_expiry and is_btc_eth:
+                    # Filter for BTC/ETH options
+                    is_option = contract_type in ['call_options', 'put_options']
+                    is_btc_eth = any(asset in symbol for asset in ['BTC', 'ETH'])
+                    
+                    if is_option and is_btc_eth:
                         symbols.append(symbol)
                 
                 # Remove duplicates and sort
@@ -81,22 +86,18 @@ class DeltaOptionsBot:
                 
                 print(f"[{datetime.now()}] ✅ Found {len(symbols)} options symbols")
                 
+                # Show what symbols we found
                 if symbols:
-                    # Show strike ranges
-                    btc_symbols = [s for s in symbols if 'BTC' in s]
-                    eth_symbols = [s for s in symbols if 'ETH' in s]
-                    
-                    btc_strikes = sorted(list(set([self.extract_strike(sym) for sym in btc_symbols])))
-                    eth_strikes = sorted(list(set([self.extract_strike(sym) for sym in eth_symbols])))
-                    
-                    if btc_strikes:
-                        print(f"[{datetime.now()}] 📊 BTC Strikes: {btc_strikes[0]:,} to {btc_strikes[-1]:,} ({len(btc_strikes)} strikes)")
-                    if eth_strikes:
-                        print(f"[{datetime.now()}] 📊 ETH Strikes: {eth_strikes[0]:,} to {eth_strikes[-1]:,} ({len(eth_strikes)} strikes)")
+                    print(f"[{datetime.now()}] 📋 Sample symbols: {symbols[:5]}")
+                else:
+                    print(f"[{datetime.now()}] ⚠️ No options symbols found. Available products:")
+                    for product in products[:10]:  # Show first 10 products
+                        print(f"  - {product.get('symbol')} ({product.get('contract_type')})")
                 
                 return symbols
             else:
                 print(f"[{datetime.now()}] ❌ API Error: {response.status_code}")
+                print(f"[{datetime.now()}] 📝 Response: {response.text}")
                 return []
                 
         except Exception as e:
@@ -115,7 +116,7 @@ class DeltaOptionsBot:
             return 0
 
     # ---------------------------
-    # WebSocket Callbacks - FULLY CORRECTED
+    # WebSocket Callbacks
     # ---------------------------
     def on_open(self, ws):
         self.connected = True
@@ -134,33 +135,33 @@ class DeltaOptionsBot:
         print(f"[{datetime.now()}] ❌ WebSocket error: {error}")
 
     def on_message(self, ws, message):
-        """Handle incoming WebSocket messages - CORRECTED"""
+        """Handle incoming WebSocket messages"""
         try:
             message_json = json.loads(message)
             message_type = message_json.get('type')
             
-            # Debug: Log all message types initially
-            if len(self.options_prices) < 10:  # Only log first few messages for debugging
-                print(f"[{datetime.now()}] 📨 Received message type: {message_type}")
+            self.message_count += 1
             
-            # ✅ CORRECT message type for l1_orderbook
+            # Log first few messages and then periodically
+            if self.message_count <= 10 or self.message_count % 50 == 0:
+                print(f"[{datetime.now()}] 📨 Message {self.message_count}: type={message_type}")
+            
             if message_type == 'l1_orderbook':
                 self.process_l1_orderbook_data(message_json)
+            elif message_type == 'subscriptions':
+                print(f"[{datetime.now()}] ✅ Subscriptions confirmed")
             elif message_type == 'success':
                 print(f"[{datetime.now()}] ✅ {message_json.get('message', 'Success')}")
             elif message_type == 'error':
-                print(f"[{datetime.now()}] ❌ Subscription error: {message_json}")
-            elif message_type == 'subscribe':
-                print(f"[{datetime.now()}] ✅ Subscription confirmed for channel")
+                print(f"[{datetime.now()}] ❌ Error: {message_json}")
                 
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Message processing error: {e}")
 
     def process_l1_orderbook_data(self, message):
-        """Process l1_orderbook data - CORRECTED"""
+        """Process l1_orderbook data"""
         try:
             symbol = message.get('symbol')
-            # ✅ CORRECT field names for l1_orderbook
             best_bid = message.get('best_bid')
             best_ask = message.get('best_ask')
             
@@ -175,9 +176,9 @@ class DeltaOptionsBot:
                         'ask': best_ask_price
                     }
                     
-                    # Only log occasionally to avoid spam
-                    if len(self.options_prices) % 50 == 0:  # Log every 50th update
-                        print(f"[{datetime.now()}] 💰 Prices tracking: {len(self.options_prices)} symbols")
+                    # Log progress
+                    if len(self.options_prices) % 20 == 0:
+                        print(f"[{datetime.now()}] 💰 Tracking {len(self.options_prices)} symbols with price data")
                     
                     # Check for arbitrage with rate limiting
                     current_time = datetime.now().timestamp()
@@ -189,15 +190,13 @@ class DeltaOptionsBot:
             print(f"[{datetime.now()}] ❌ Error processing l1_orderbook data: {e}")
 
     def check_arbitrage_opportunities(self):
-        """Check for arbitrage opportunities with rate limiting"""
-        # Only check if we have sufficient data
-        if len(self.options_prices) < 20:  # Wait for more data
+        """Check for arbitrage opportunities"""
+        if len(self.options_prices) < 10:
             return
             
         btc_options = []
         eth_options = []
         
-        # Separate BTC and ETH options
         for symbol, prices in self.options_prices.items():
             option_data = {
                 'symbol': symbol,
@@ -210,30 +209,33 @@ class DeltaOptionsBot:
             elif 'ETH' in symbol:
                 eth_options.append(option_data)
         
-        # Check arbitrage for both assets
         if btc_options:
             self.check_arbitrage('BTC', btc_options)
         if eth_options:
             self.check_arbitrage('ETH', eth_options)
 
     def subscribe_to_options(self):
-        """Subscribe to all available options"""
+        """Subscribe to available options"""
         symbols = self.get_all_options_symbols()
         
         if not symbols:
-            print(f"[{datetime.now()}] ⚠️ No symbols found from API, using fallback...")
-            symbols = self.get_fallback_symbols()
+            print(f"[{datetime.now()}] ⚠️ No live options symbols found from API")
+            print(f"[{datetime.now()}] 🔄 Using spot symbols for testing...")
+            # Subscribe to some spot symbols for testing
+            symbols = [
+                "BTCUSDT", "ETHUSDT", "BTC-17OCT25-60000-C", "BTC-17OCT25-60000-P",
+                "ETH-17OCT25-3000-C", "ETH-17OCT25-3000-P"
+            ]
         
         self.active_symbols = symbols
         
         if symbols:
-            # ✅ CORRECT channel name
             payload = {
                 "type": "subscribe",
                 "payload": {
                     "channels": [
                         {
-                            "name": "l1_orderbook",  # ✅ CORRECT channel name
+                            "name": "l1_orderbook",
                             "symbols": symbols
                         }
                     ]
@@ -241,37 +243,36 @@ class DeltaOptionsBot:
             }
             
             self.ws.send(json.dumps(payload))
-            print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} options symbols on l1_orderbook channel")
+            print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} symbols")
+            print(f"[{datetime.now()}] 📋 Symbols: {symbols}")
             
-            # Send connection alert
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                self.send_telegram(f"🔗 *Bot Connected* 🔗\n\n✅ Connected to Delta Exchange\n📅 Expiry: {self.current_expiry}\n📊 Monitoring: {len(symbols)} symbols\n📈 Channel: l1_orderbook\n\nBot is now live! 🚀")
+            # Test Telegram with simple message
+            self.test_telegram()
         else:
             print(f"[{datetime.now()}] ❌ No symbols available to subscribe")
 
-    def get_fallback_symbols(self):
-        """Fallback symbols if API fails - CORRECTED FORMAT"""
-        symbols = []
-        
-        # Common strikes around current market - ✅ CORRECT FORMAT
-        btc_strikes = [58000, 59000, 60000, 61000, 62000, 63000, 64000, 65000]
-        eth_strikes = [2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500]
-        
-        # ✅ CORRECT SYMBOL FORMAT: C-BTC-{strike}-{expiry}
-        for strike in btc_strikes:
-            symbols.append(f"C-BTC-{strike}-{self.current_expiry}")
-            symbols.append(f"P-BTC-{strike}-{self.current_expiry}")
-        
-        for strike in eth_strikes:
-            symbols.append(f"C-ETH-{strike}-{self.current_expiry}")
-            symbols.append(f"P-ETH-{strike}-{self.current_expiry}")
-        
-        print(f"[{datetime.now()}] 🔄 Using {len(symbols)} fallback symbols")
-        return symbols
+    def test_telegram(self):
+        """Test Telegram connection with simple message"""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print(f"[{datetime.now()}] ⚠️ Telegram credentials not configured")
+            return
+            
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            resp = requests.post(url, data={
+                "chat_id": TELEGRAM_CHAT_ID, 
+                "text": "🤖 Bot connected to Delta Exchange", 
+                "parse_mode": "Markdown"
+            })
+            if resp.status_code == 200:
+                print(f"[{datetime.now()}] 📱 Telegram test message sent")
+            else:
+                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Telegram test failed: {e}")
 
     def check_arbitrage(self, asset, options):
         """Check for arbitrage opportunities"""
-        # Group by strike price
         strikes = {}
         for option in options:
             strike = self.extract_strike(option['symbol'])
@@ -279,24 +280,22 @@ class DeltaOptionsBot:
                 if strike not in strikes:
                     strikes[strike] = {'call': {}, 'put': {}}
                 
-                if 'C-' in option['symbol']:
+                if 'C' in option['symbol']:
                     strikes[strike]['call'] = {'bid': option['bid'], 'ask': option['ask']}
-                elif 'P-' in option['symbol']:
+                elif 'P' in option['symbol']:
                     strikes[strike]['put'] = {'bid': option['bid'], 'ask': option['ask']}
         
-        # Sort strikes
         sorted_strikes = sorted(strikes.keys())
         
         if len(sorted_strikes) < 2:
             return
         
-        # Check adjacent strikes for arbitrage
         alerts = []
         for i in range(len(sorted_strikes) - 1):
             strike1 = sorted_strikes[i]
             strike2 = sorted_strikes[i + 1]
             
-            # CALL arbitrage: Buy lower strike, sell higher strike
+            # CALL arbitrage
             call1_ask = strikes[strike1]['call'].get('ask', 0)
             call2_bid = strikes[strike2]['call'].get('bid', 0)
             
@@ -308,7 +307,7 @@ class DeltaOptionsBot:
                         profit = abs(call_diff)
                         alerts.append(f"🔷 CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
             
-            # PUT arbitrage: Sell lower strike, buy higher strike
+            # PUT arbitrage
             put1_bid = strikes[strike1]['put'].get('bid', 0)
             put2_ask = strikes[strike2]['put'].get('ask', 0)
             
@@ -320,11 +319,9 @@ class DeltaOptionsBot:
                         profit = abs(put_diff)
                         alerts.append(f"🟣 PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
         
-        # Send alerts if any found
         if alerts:
             message = f"🚨 *{asset} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
             message += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S')}_"
-            message += f"\n_Expiry: {self.current_expiry}_"
             self.send_telegram(message)
             print(f"[{datetime.now()}] ✅ Sent {len(alerts)} {asset} arbitrage alerts")
 
@@ -338,7 +335,6 @@ class DeltaOptionsBot:
 
     def send_telegram(self, message):
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            print(f"[{datetime.now()}] ⚠️ Telegram credentials not set")
             return
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -350,12 +346,12 @@ class DeltaOptionsBot:
             if resp.status_code == 200:
                 print(f"[{datetime.now()}] 📱 Telegram alert sent")
             else:
-                print(f"[{datetime.now()}] ❌ Telegram API error: {resp.status_code}")
+                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}")
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Telegram send error: {e}")
+            print(f"[{datetime.now()}] ❌ Telegram error: {e}")
 
     def connect(self):
-        """Connect to WebSocket - runs in its own thread"""
+        """Connect to WebSocket"""
         print(f"[{datetime.now()}] 🌐 Connecting to Delta WebSocket...")
         self.ws = websocket.WebSocketApp(
             self.websocket_url,
@@ -374,9 +370,7 @@ class DeltaOptionsBot:
                     self.connect()
                 except Exception as e:
                     print(f"[{datetime.now()}] ❌ Bot connection error: {e}")
-                    if self.should_reconnect:
-                        print(f"[{datetime.now()}] 🔄 Restarting bot in 10 seconds...")
-                        sleep(10)
+                    sleep(10)
         
         bot_thread = threading.Thread(target=run_bot)
         bot_thread.daemon = True
@@ -394,11 +388,10 @@ def home():
     return f"""
     <h1>Delta Options Arbitrage Bot</h1>
     <p>Status: {status}</p>
-    <p>Monitoring: BTC & ETH Options</p>
+    <p>Messages Received: {bot.message_count}</p>
     <p>Current Prices: {len(bot.options_prices)} symbols</p>
     <p>Active Symbols: {len(bot.active_symbols)}</p>
     <p>Expiry: {bot.current_expiry}</p>
-    <p>WebSocket Channel: l1_orderbook</p>
     <p>Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     <p><a href="/debug">Debug Info</a> | <a href="/health">Health</a></p>
     """
@@ -408,56 +401,43 @@ def health():
     return {
         "status": "healthy", 
         "bot_connected": bot.connected, 
+        "messages_received": bot.message_count,
         "symbols_tracked": len(bot.options_prices),
         "active_symbols": len(bot.active_symbols),
-        "expiry": bot.current_expiry,
-        "websocket_channel": "l1_orderbook"
+        "expiry": bot.current_expiry
     }, 200
 
 @app.route('/debug')
 def debug():
-    """Debug endpoint to check WebSocket data"""
-    sample_prices = dict(list(bot.options_prices.items())[:5])  # First 5 symbols
+    """Debug endpoint"""
+    sample_prices = dict(list(bot.options_prices.items())[:3])
     return {
         "connected": bot.connected,
+        "messages_received": bot.message_count,
+        "symbols_tracked": len(bot.options_prices),
         "active_symbols_count": len(bot.active_symbols),
-        "price_data_count": len(bot.options_prices),
         "sample_prices": sample_prices,
-        "active_symbols_sample": bot.active_symbols[:5] if bot.active_symbols else [],
-        "websocket_channel": "l1_orderbook"
+        "active_symbols_sample": bot.active_symbols[:5]
     }
 
-@app.route('/ping')
-def ping():
-    return "pong", 200
-
 # -------------------------------
-# Start Bot in Background Thread
+# Start Bot
 # -------------------------------
 def start_bot():
-    """Start the bot in a separate thread"""
     print(f"[{datetime.now()}] 🤖 Starting Delta Options Bot...")
     bot_thread = threading.Thread(target=bot.start)
     bot_thread.daemon = True
     bot_thread.start()
     print(f"[{datetime.now()}] ✅ Bot thread started")
 
-# -------------------------------
-# Main
-# -------------------------------
 if __name__ == "__main__":
     print("="*50)
-    print("Delta Options Arbitrage Bot - FULLY CORRECTED")
-    print("WebSocket Channel: l1_orderbook")
+    print("Delta Options Arbitrage Bot - DEBUG VERSION")
     print("="*50)
     
-    # Start the bot FIRST
     start_bot()
-    
-    # Give bot a moment to start connecting
     sleep(2)
     
-    # Then start Flask app
     port = int(os.environ.get("PORT", 10000))
     print(f"[{datetime.now()}] 🚀 Starting web server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
