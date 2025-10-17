@@ -4,7 +4,7 @@ import brotli
 import base64
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from time import sleep
 from flask import Flask
 import threading
@@ -13,15 +13,11 @@ import threading
 app = Flask(__name__)
 
 # -------------------------------
-# Telegram Configuration
+# Configuration
 # -------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# Minimum Δ threshold for alerts
 DELTA_THRESHOLD = {"BTC": 2, "ETH": 0.16}
-
-# Minimum time between alerts per strike in seconds
 ALERT_COOLDOWN = 60
 
 # -------------------------------
@@ -29,12 +25,94 @@ ALERT_COOLDOWN = 60
 # -------------------------------
 class DeltaOptionsBot:
     def __init__(self):
-        self.ws_url = "wss://socket.delta.exchange"  # Changed from india domain
+        self.websocket_url = "wss://socket.india.delta.exchange"
         self.ws = None
-        self.last_alert_time = {}  # Track last alert per strike
-        self.options_prices = {}   # Current bid/ask
-        self.assets = ["BTC", "ETH"]
+        self.last_alert_time = {}
+        self.options_prices = {}
         self.connected = False
+        self.current_expiry = self.get_current_expiry()
+        self.active_symbols = []
+
+    def get_current_expiry(self):
+        """Get current expiry in DDMMYY format"""
+        now = datetime.now(timezone.utc)
+        ist_now = now + timedelta(hours=5, minutes=30)
+        
+        if ist_now.hour >= 17 and ist_now.minute >= 30:
+            expiry_date = ist_now + timedelta(days=1)
+        else:
+            expiry_date = ist_now
+        
+        expiry_str = expiry_date.strftime("%d%m%y")
+        print(f"[{datetime.now()}] 📅 Using expiry: {expiry_str}")
+        return expiry_str
+
+    def get_all_options_symbols(self):
+        """Fetch ALL available BTC/ETH options symbols"""
+        try:
+            print(f"[{datetime.now()}] 🔍 Fetching options symbols...")
+            url = "https://api.india.delta.exchange/v2/products"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                products = response.json().get('result', [])
+                symbols = []
+                
+                for product in products:
+                    symbol = product.get('symbol', '')
+                    contract_type = str(product.get('contract_type', '')).lower()
+                    
+                    # Filter for BTC/ETH options for current expiry
+                    is_option = any(opt in contract_type for opt in ['call', 'put', 'option'])
+                    is_current_expiry = self.current_expiry in symbol
+                    
+                    if is_option and is_current_expiry:
+                        if symbol.startswith(('C-BTC-', 'P-BTC-', 'C-ETH-', 'P-ETH-')):
+                            symbols.append(symbol)
+                
+                # Remove duplicates and sort
+                symbols = sorted(list(set(symbols)))
+                
+                print(f"[{datetime.now()}] ✅ Found {len(symbols)} options symbols")
+                
+                # Show strike ranges
+                btc_strikes = sorted(list(set([self.extract_strike(sym) for sym in symbols if 'BTC' in sym])))
+                eth_strikes = sorted(list(set([self.extract_strike(sym) for sym in symbols if 'ETH' in sym])))
+                
+                if btc_strikes:
+                    print(f"[{datetime.now()}] 📊 BTC Strikes: {btc_strikes[0]:,} to {btc_strikes[-1]:,} ({len(btc_strikes)} strikes)")
+                if eth_strikes:
+                    print(f"[{datetime.now()}] 📊 ETH Strikes: {eth_strikes[0]:,} to {eth_strikes[-1]:,} ({len(eth_strikes)} strikes)")
+                
+                return symbols
+            else:
+                print(f"[{datetime.now()}] ❌ API Error: {response.status_code}")
+                return []
+                
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Error fetching symbols: {e}")
+            return []
+
+    def extract_strike(self, symbol):
+        """Extract strike price from symbol"""
+        try:
+            parts = symbol.split('-')
+            for part in parts:
+                if part.isdigit():
+                    return int(part)
+            return 0
+        except:
+            return 0
+
+    def decompress_brotli_data(self, compressed_data):
+        """Decompress Brotli compressed data"""
+        try:
+            decoded_data = base64.b64decode(compressed_data)
+            decompressed_data = brotli.decompress(decoded_data)
+            return json.loads(decompressed_data.decode('utf-8'))
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Decompression error: {e}")
+            return []
 
     # ---------------------------
     # WebSocket Callbacks
@@ -42,12 +120,11 @@ class DeltaOptionsBot:
     def on_open(self, ws):
         self.connected = True
         print(f"[{datetime.now()}] ✅ Connected to Delta Exchange WebSocket")
-        self.subscribe_all_options()
+        self.subscribe_to_options()
 
     def on_close(self, ws, close_status_code, close_msg):
         self.connected = False
-        print(f"[{datetime.now()}] 🔴 WebSocket closed: {close_status_code} - {close_msg}")
-        # Auto-reconnect after 10 seconds
+        print(f"[{datetime.now()}] 🔴 WebSocket closed - reconnecting in 10s...")
         sleep(10)
         self.connect()
 
@@ -55,181 +132,178 @@ class DeltaOptionsBot:
         print(f"[{datetime.now()}] ❌ WebSocket error: {error}")
 
     def on_message(self, ws, message):
+        """Handle incoming WebSocket messages"""
         try:
-            msg = json.loads(message)
-            if msg.get("type") == "l1ob_c":
-                self.process_bid_ask(msg)
-            elif msg.get("type") in ["success", "error"]:
-                print(f"[{datetime.now()}] {msg.get('type').upper()}: {msg.get('message')}")
+            message_json = json.loads(message)
+            message_type = message_json.get('type')
+            
+            if message_type == 'l1ob_c':
+                self.process_bid_ask_data(message_json)
+            elif message_type == 'success':
+                print(f"[{datetime.now()}] ✅ {message_json.get('message', 'Success')}")
+            elif message_type == 'error':
+                print(f"[{datetime.now()}] ❌ Error: {message_json}")
+                
         except Exception as e:
-            print(f"[{datetime.now()}] Message processing error: {e}")
+            print(f"[{datetime.now()}] ❌ Message processing error: {e}")
 
-    # ---------------------------
-    # Subscribe to current options
-    # ---------------------------
-    def subscribe_all_options(self):
-        expiries = self.get_current_expiries()
-        if not expiries:
-            print(f"[{datetime.now()}] ⚠️ No expiries found, retrying in 10s...")
-            sleep(10)
-            expiries = self.get_current_expiries()
-
-        if expiries:
-            payload = {
-                "type": "subscribe",
-                "payload": {
-                    "channels": [{"name": "l1ob_c", "symbols": expiries}]
-                }
+    def subscribe_to_options(self):
+        """Subscribe to all available options"""
+        symbols = self.get_all_options_symbols()
+        
+        if not symbols:
+            print(f"[{datetime.now()}] ⚠️ No symbols found, using fallback...")
+            symbols = self.get_fallback_symbols()
+        
+        self.active_symbols = symbols
+        
+        payload = {
+            "type": "subscribe",
+            "payload": {
+                "channels": [
+                    {
+                        "name": "l1ob_c",
+                        "symbols": symbols
+                    }
+                ]
             }
-            self.ws.send(json.dumps(payload))
-            print(f"[{datetime.now()}] 📡 Subscribed to {len(expiries)} options symbols")
-        else:
-            print(f"[{datetime.now()}] ❌ No options symbols found to subscribe")
+        }
+        
+        self.ws.send(json.dumps(payload))
+        print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} options symbols")
+        
+        # Send connection alert
+        self.send_telegram(f"🔗 *Bot Connected* 🔗\n\n✅ Connected to Delta Exchange\n📅 Expiry: {self.current_expiry}\n📊 Monitoring: {len(symbols)} symbols\n\nBot is now live! 🚀")
 
-    # ---------------------------
-    # Fetch current expiries dynamically
-    # ---------------------------
-    def get_current_expiries(self):
-        expiries = []
-        try:
-            resp = requests.get("https://api.delta.exchange/v2/products", timeout=10).json()  # Changed from india domain
-            products = resp.get("result", [])
-            for p in products:
-                sym = p.get("symbol", "")
-                underlying = p.get("underlying_asset", {}).get("symbol", "")
-                ctype = str(p.get("contract_type", "")).lower()
-                if ctype in ["call", "put", "option"]:
-                    for asset in self.assets:
-                        if asset in sym or asset in underlying:
-                            expiries.append(sym)
-            print(f"[{datetime.now()}] 🔍 Found {len(expiries)} options symbols")
-        except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error fetching expiries: {e}")
-        return expiries
+    def get_fallback_symbols(self):
+        """Fallback symbols if API fails"""
+        symbols = []
+        
+        # Common strikes around current market
+        btc_strikes = [58000, 59000, 60000, 61000, 62000, 63000, 64000, 65000]
+        eth_strikes = [2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500]
+        
+        for strike in btc_strikes:
+            symbols.append(f"C-BTC-{self.current_expiry}-{strike}")
+            symbols.append(f"P-BTC-{self.current_expiry}-{strike}")
+        
+        for strike in eth_strikes:
+            symbols.append(f"C-ETH-{self.current_expiry}-{strike}")
+            symbols.append(f"P-ETH-{self.current_expiry}-{strike}")
+        
+        return symbols
 
-    # ---------------------------
-    # Brotli Decompression
-    # ---------------------------
-    def decompress_brotli(self, compressed):
-        try:
-            decoded = base64.b64decode(compressed)
-            decompressed = brotli.decompress(decoded)
-            return json.loads(decompressed.decode("utf-8"))
-        except Exception as e:
-            print(f"[{datetime.now()}] ❌ Decompression error: {e}")
-            return []
-
-    # ---------------------------
-    # Process bid/ask updates
-    # ---------------------------
-    def process_bid_ask(self, msg):
-        data = self.decompress_brotli(msg.get("c", ""))
-        if not data:
+    def process_bid_ask_data(self, message):
+        """Process bid/ask data and check for arbitrage"""
+        decompressed_data = self.decompress_brotli_data(message.get('c', ''))
+        if not decompressed_data:
             return
-
-        asset_options = {asset: [] for asset in self.assets}
 
         # Update current prices
-        for option in data:
-            sym = option.get("s")
-            d = option.get("d", [])
-            if len(d) < 4:
-                continue
-            best_ask = float(d[0]) if d[0] else None
-            best_bid = float(d[2]) if d[2] else None
+        btc_options = []
+        eth_options = []
+        
+        for option_data in decompressed_data:
+            symbol = option_data['s']
+            bid_ask_data = option_data['d']
             
-            if best_bid and best_ask:
-                self.options_prices[sym] = {"bid": best_bid, "ask": best_ask}
-
-                for asset in self.assets:
-                    if asset in sym:
-                        asset_options[asset].append({
-                            "symbol": sym,
-                            "bid": best_bid,
-                            "ask": best_ask
+            # Parse: [BestAsk, AskSize, BestBid, BidSize]
+            if len(bid_ask_data) >= 4:
+                best_ask = float(bid_ask_data[0]) if bid_ask_data[0] else None
+                best_bid = float(bid_ask_data[2]) if bid_ask_data[2] else None
+                
+                if best_bid and best_ask:
+                    self.options_prices[symbol] = {'bid': best_bid, 'ask': best_ask}
+                    
+                    # Separate BTC and ETH options
+                    if symbol.startswith('C-BTC-') or symbol.startswith('P-BTC-'):
+                        btc_options.append({
+                            'symbol': symbol,
+                            'bid': best_bid,
+                            'ask': best_ask
                         })
+                    elif symbol.startswith('C-ETH-') or symbol.startswith('P-ETH-'):
+                        eth_options.append({
+                            'symbol': symbol,
+                            'bid': best_bid,
+                            'ask': best_ask
+                        })
+        
+        # Check for arbitrage opportunities
+        if btc_options:
+            self.check_arbitrage('BTC', btc_options)
+        if eth_options:
+            self.check_arbitrage('ETH', eth_options)
 
-        # Generate and send alerts per asset
-        for asset in self.assets:
-            self.generate_alert(asset, asset_options[asset])
-
-    # ---------------------------
-    # Generate Telegram Alerts
-    # ---------------------------
-    def generate_alert(self, asset, options):
-        if not options or len(options) < 2:
+    def check_arbitrage(self, asset, options):
+        """Check for arbitrage opportunities"""
+        # Group by strike price
+        strikes = {}
+        for option in options:
+            strike = self.extract_strike(option['symbol'])
+            if strike > 0:
+                if strike not in strikes:
+                    strikes[strike] = {'call': {}, 'put': {}}
+                
+                if 'C-' in option['symbol']:
+                    strikes[strike]['call'] = {'bid': option['bid'], 'ask': option['ask']}
+                elif 'P-' in option['symbol']:
+                    strikes[strike]['put'] = {'bid': option['bid'], 'ask': option['ask']}
+        
+        # Sort strikes
+        sorted_strikes = sorted(strikes.keys())
+        
+        if len(sorted_strikes) < 2:
             return
-
-        options_sorted = sorted(options, key=lambda x: x["symbol"])
+        
+        # Check adjacent strikes for arbitrage
         alerts = []
-
-        for i in range(len(options_sorted)-1):
-            curr = options_sorted[i]
-            nxt = options_sorted[i+1]
-            delta_threshold = DELTA_THRESHOLD[asset]
-
-            # Call option alert logic
-            if "C" in curr["symbol"] and curr["ask"] and nxt["bid"]:
-                delta = curr["ask"] - nxt["bid"]
-                if delta >= delta_threshold:
-                    key = f"{asset}_CALL_{curr['symbol']}"
-                    now = datetime.now().timestamp()
-                    last_time = self.last_alert_time.get(key, 0)
-                    if now - last_time >= ALERT_COOLDOWN:
-                        strike = curr["symbol"].split("-")[2] if len(curr["symbol"].split("-")) > 2 else "N/A"
-                        next_strike = nxt["symbol"].split("-")[2] if len(nxt["symbol"].split("-")) > 2 else "N/A"
-                        alerts.append({
-                            "type": "CALL",
-                            "strike": strike,
-                            "next_strike": next_strike,
-                            "ask": curr["ask"],
-                            "next_bid": nxt["bid"],
-                            "delta": delta
-                        })
-                        self.last_alert_time[key] = now
-
-            # Put option alert logic  
-            if "P" in curr["symbol"] and curr["bid"] and nxt["ask"]:
-                delta = curr["bid"] - nxt["ask"]
-                if delta >= delta_threshold:
-                    key = f"{asset}_PUT_{curr['symbol']}"
-                    now = datetime.now().timestamp()
-                    last_time = self.last_alert_time.get(key, 0)
-                    if now - last_time >= ALERT_COOLDOWN:
-                        strike = curr["symbol"].split("-")[2] if len(curr["symbol"].split("-")) > 2 else "N/A"
-                        next_strike = nxt["symbol"].split("-")[2] if len(nxt["symbol"].split("-")) > 2 else "N/A"
-                        alerts.append({
-                            "type": "PUT",
-                            "strike": strike,
-                            "next_strike": next_strike,
-                            "bid": curr["bid"],
-                            "next_ask": nxt["ask"],
-                            "delta": delta
-                        })
-                        self.last_alert_time[key] = now
-
-        # Sort alerts by delta descending
-        alerts = sorted(alerts, key=lambda x: x["delta"], reverse=True)
-
-        # Send message if any alerts
+        for i in range(len(sorted_strikes) - 1):
+            strike1 = sorted_strikes[i]
+            strike2 = sorted_strikes[i + 1]
+            
+            # CALL arbitrage: Buy lower strike, sell higher strike
+            call1_ask = strikes[strike1]['call'].get('ask', 0)
+            call2_bid = strikes[strike2]['call'].get('bid', 0)
+            
+            if call1_ask > 0 and call2_bid > 0:
+                call_diff = call1_ask - call2_bid
+                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
+                    alert_key = f"{asset}_CALL_{strike1}_{strike2}"
+                    if self.can_alert(alert_key):
+                        profit = abs(call_diff)
+                        alerts.append(f"🔷 CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
+            
+            # PUT arbitrage: Sell lower strike, buy higher strike
+            put1_bid = strikes[strike1]['put'].get('bid', 0)
+            put2_ask = strikes[strike2]['put'].get('ask', 0)
+            
+            if put1_bid > 0 and put2_ask > 0:
+                put_diff = put2_ask - put1_bid
+                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
+                    alert_key = f"{asset}_PUT_{strike1}_{strike2}"
+                    if self.can_alert(alert_key):
+                        profit = abs(put_diff)
+                        alerts.append(f"🟣 PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
+        
+        # Send alerts if any found
         if alerts:
-            msg_lines = [f"*{asset} OPTIONS ALERT*\nUpdated: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n"]
-            for a in alerts:
-                if a["type"] == "CALL":
-                    msg_lines.append(f'CALL ⚡\nStrike: {a["strike"]} → Next: {a["next_strike"]}\nAsk: {a["ask"]} | Next Bid: {a["next_bid"]}\nΔ: {a["delta"]:.2f}\n')
-                else:
-                    msg_lines.append(f'PUT ⚡\nStrike: {a["strike"]} → Next: {a["next_strike"]}\nBid: {a["bid"]} | Next Ask: {a["next_ask"]}\nΔ: {a["delta"]:.2f}\n')
-
-            message = "\n".join(msg_lines)
+            message = f"🚨 *{asset} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
+            message += f"\n\n_Time: {datetime.now().strftime('%H:%M:%S')}_"
+            message += f"\n_Expiry: {self.current_expiry}_"
             self.send_telegram(message)
             print(f"[{datetime.now()}] ✅ Sent {len(alerts)} {asset} arbitrage alerts")
 
-    # ---------------------------
-    # Send Telegram
-    # ---------------------------
+    def can_alert(self, alert_key):
+        now = datetime.now().timestamp()
+        last_time = self.last_alert_time.get(alert_key, 0)
+        if now - last_time >= ALERT_COOLDOWN:
+            self.last_alert_time[alert_key] = now
+            return True
+        return False
+
     def send_telegram(self, message):
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            print(f"[{datetime.now()}] ⚠️ Telegram not configured.")
             return
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -239,19 +313,13 @@ class DeltaOptionsBot:
                 "parse_mode": "Markdown"
             })
             if resp.status_code == 200:
-                print(f"[{datetime.now()}] 📱 Telegram alert sent.")
-            else:
-                print(f"[{datetime.now()}] ❌ Telegram error: {resp.text}")
+                print(f"[{datetime.now()}] 📱 Telegram alert sent")
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Telegram send error: {e}")
+            print(f"[{datetime.now()}] ❌ Telegram error: {e}")
 
-    # ---------------------------
-    # Connect WebSocket
-    # ---------------------------
     def connect(self):
-        print(f"[{datetime.now()}] 🌐 Connecting to Delta WebSocket...")
         self.ws = websocket.WebSocketApp(
-            self.ws_url,
+            self.websocket_url,
             on_open=self.on_open,
             on_message=self.on_message,
             on_error=self.on_error,
@@ -260,14 +328,13 @@ class DeltaOptionsBot:
         self.ws.run_forever()
 
     def start(self):
-        """Start the bot in a separate thread"""
         def run_bot():
             try:
                 self.connect()
             except Exception as e:
                 print(f"[{datetime.now()}] ❌ Bot error: {e}")
                 sleep(10)
-                self.start()  # Restart on error
+                self.start()
         
         bot_thread = threading.Thread(target=run_bot)
         bot_thread.daemon = True
@@ -286,6 +353,7 @@ def home():
     <p>Status: {status}</p>
     <p>Monitoring: BTC & ETH Options</p>
     <p>Symbols: {len(bot.options_prices)}</p>
+    <p>Active Symbols: {len(bot.active_symbols)}</p>
     <p>Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     """
 
@@ -293,29 +361,18 @@ def home():
 def health():
     return {"status": "healthy", "connected": bot.connected, "symbols": len(bot.options_prices)}, 200
 
-@app.route('/status')
-def status():
-    return {
-        "connected": bot.connected,
-        "monitored_symbols": len(bot.options_prices),
-        "last_alert_time": bot.last_alert_time,
-        "current_prices": bot.options_prices
-    }
-
 # -------------------------------
 # Main
 # -------------------------------
 if __name__ == "__main__":
     print("="*50)
-    print("Delta Options Bid/Ask Monitor with Telegram Alerts")
+    print("Delta Options Arbitrage Bot")
     print("="*50)
     
     # Start the bot
     bot.start()
     
-    # Get port from environment variable (Render provides this)
-    port = int(os.environ.get("PORT", 10000))
-    
     # Start Flask app
+    port = int(os.environ.get("PORT", 10000))
     print(f"[{datetime.now()}] 🚀 Starting web server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
