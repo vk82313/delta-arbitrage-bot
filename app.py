@@ -7,7 +7,6 @@ from time import sleep
 from flask import Flask
 import threading
 
-
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -19,10 +18,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DELTA_THRESHOLD = {"BTC": 2, "ETH": 0.16}
 ALERT_COOLDOWN = 60
 PROCESS_INTERVAL = 2
-EXPIRY_CHECK_INTERVAL = 60  # Check every 1 minute for expiry rollover
+EXPIRY_CHECK_INTERVAL = 60
 
 # -------------------------------
-# Delta WebSocket Client - COMPLETE WITH ALL METHODS
+# Delta WebSocket Client - CORRECT ARBITRAGE LOGIC
 # -------------------------------
 class DeltaOptionsBot:
     def __init__(self):
@@ -51,7 +50,6 @@ class DeltaOptionsBot:
         now = datetime.now(timezone.utc)
         ist_now = now + timedelta(hours=5, minutes=30)
         
-        # If it's after 5:30 PM IST, we should already be on next day's expiry
         if ist_now.hour >= 17 and ist_now.minute >= 30:
             next_day = ist_now + timedelta(days=1)
             next_expiry = next_day.strftime("%d%m%y")
@@ -66,7 +64,6 @@ class DeltaOptionsBot:
         now = datetime.now(timezone.utc)
         ist_now = now + timedelta(hours=5, minutes=30)
         
-        # After 5:30 PM IST, move to next day's expiry
         if ist_now.hour >= 17 and ist_now.minute >= 30:
             next_expiry = (ist_now + timedelta(days=1)).strftime("%d%m%y")
             return next_expiry
@@ -108,12 +105,10 @@ class DeltaOptionsBot:
         
         print(f"[{datetime.now()}] 📊 Available expiries: {available_expiries}")
         
-        # Find the first expiry that is > current expiry
         for expiry in available_expiries:
             if expiry > current_expiry:
                 return expiry
         
-        # If no future expiry found, return the last available one
         return available_expiries[-1]
 
     def check_and_update_expiry(self):
@@ -122,41 +117,34 @@ class DeltaOptionsBot:
         if current_time - self.last_expiry_check >= EXPIRY_CHECK_INTERVAL:
             self.last_expiry_check = current_time
             
-            # Get current time in IST
             now = datetime.now(timezone.utc)
             ist_now = now + timedelta(hours=5, minutes=30)
             current_time_ist = ist_now.strftime("%H:%M:%S")
             
             print(f"[{datetime.now()}] 🔄 Checking expiry rollover... (Current: {self.active_expiry}, Time: {current_time_ist} IST)")
             
-            # Check if we should rollover to next expiry
             next_expiry = self.should_rollover_expiry()
             if next_expiry and next_expiry != self.active_expiry:
                 print(f"[{datetime.now()}] 🎯 EXPIRY ROLLOVER TRIGGERED!")
                 print(f"[{datetime.now()}] 📅 Changing from {self.active_expiry} to {next_expiry}")
                 
-                # Get the actual next available expiry from API
                 actual_next_expiry = self.get_next_available_expiry(self.active_expiry)
                 
                 if actual_next_expiry != self.active_expiry:
                     self.active_expiry = actual_next_expiry
                     self.expiry_rollover_count += 1
                     
-                    # Reset data for new expiry
                     self.options_prices = {}
                     self.active_symbols = []
                     
-                    # Resubscribe with new expiry
                     if self.connected and self.ws:
                         self.subscribe_to_options()
                     
-                    # Send Telegram notification
                     self.send_telegram(f"🔄 *Expiry Rollover Complete!*\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_ist} IST\n\nBot automatically switched to new expiry! ✅")
                     return True
                 else:
                     print(f"[{datetime.now()}] ⚠️ No new expiry available yet, keeping: {self.active_expiry}")
             
-            # Also check if current expiry is still available
             available_expiries = self.get_available_expiries()
             if available_expiries and self.active_expiry not in available_expiries:
                 print(f"[{datetime.now()}] ⚠️ Current expiry {self.active_expiry} no longer available!")
@@ -166,7 +154,6 @@ class DeltaOptionsBot:
                     self.active_expiry = next_available
                     self.expiry_rollover_count += 1
                     
-                    # Reset and resubscribe
                     self.options_prices = {}
                     self.active_symbols = []
                     
@@ -220,7 +207,6 @@ class DeltaOptionsBot:
                     symbol = product.get('symbol', '')
                     contract_type = product.get('contract_type', '')
                     
-                    # Filter for BTC/ETH options with ACTIVE expiry only
                     is_option = contract_type in ['call_options', 'put_options']
                     is_btc_eth = any(asset in symbol for asset in ['BTC', 'ETH'])
                     is_active_expiry = self.active_expiry in symbol
@@ -236,13 +222,12 @@ class DeltaOptionsBot:
                     available_expiries = self.get_available_expiries()
                     print(f"[{datetime.now()}] ⚠️ No symbols found for {self.active_expiry}")
                     print(f"[{datetime.now()}] 📅 Available expiries: {available_expiries}")
-                    # If no symbols for current expiry, try to find next available
                     if available_expiries:
                         next_expiry = self.get_next_available_expiry(self.active_expiry)
                         if next_expiry != self.active_expiry:
                             print(f"[{datetime.now()}] 🔄 Auto-switching to available expiry: {next_expiry}")
                             self.active_expiry = next_expiry
-                            return self.get_all_options_symbols()  # Recursive call with new expiry
+                            return self.get_all_options_symbols()
                 
                 return symbols
             else:
@@ -276,7 +261,6 @@ class DeltaOptionsBot:
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages"""
         try:
-            # Check for expiry rollover first (on EVERY message)
             self.check_and_update_expiry()
             
             message_json = json.loads(message)
@@ -307,10 +291,9 @@ class DeltaOptionsBot:
             best_ask = message.get('best_ask')
             
             if symbol and best_bid is not None and best_ask is not None:
-                # ONLY process symbols with ACTIVE expiry
                 symbol_expiry = self.extract_expiry_from_symbol(symbol)
                 if symbol_expiry != self.active_expiry:
-                    return  # Skip if not active expiry
+                    return
                 
                 best_bid_price = float(best_bid) if best_bid else 0
                 best_ask_price = float(best_ask) if best_ask else 0
@@ -352,68 +335,74 @@ class DeltaOptionsBot:
             elif 'ETH' in symbol:
                 eth_options.append(option_data)
         
-        # Check arbitrage for both assets
         if btc_options:
             self.check_arbitrage_same_expiry('BTC', btc_options)
         if eth_options:
             self.check_arbitrage_same_expiry('ETH', eth_options)
 
     def check_arbitrage_same_expiry(self, asset, options):
-        """Check for arbitrage opportunities within ACTIVE expiry"""
-        strikes = {}
+        """CORRECTED ARBITRAGE LOGIC: Compare CALL with CALL, PUT with PUT only"""
+        # Separate calls and puts
+        calls = {}
+        puts = {}
+        
         for option in options:
             strike = self.extract_strike(option['symbol'])
             if strike > 0:
-                if strike not in strikes:
-                    strikes[strike] = {'call': {}, 'put': {}}
-                
                 if 'C-' in option['symbol']:
-                    strikes[strike]['call'] = {
-                        'bid': option['bid'], 
+                    calls[strike] = {
+                        'bid': option['bid'],
                         'ask': option['ask'],
                         'symbol': option['symbol']
                     }
                 elif 'P-' in option['symbol']:
-                    strikes[strike]['put'] = {
-                        'bid': option['bid'], 
+                    puts[strike] = {
+                        'bid': option['bid'],
                         'ask': option['ask'],
                         'symbol': option['symbol']
                     }
         
-        sorted_strikes = sorted(strikes.keys())
-        
-        if len(sorted_strikes) < 2:
-            return
-        
         alerts = []
         
-        for i in range(len(sorted_strikes) - 1):
-            strike1 = sorted_strikes[i]
-            strike2 = sorted_strikes[i + 1]
-            
-            # CALL arbitrage
-            call1_ask = strikes[strike1]['call'].get('ask', 0)
-            call2_bid = strikes[strike2]['call'].get('bid', 0)
-            
-            if call1_ask > 0 and call2_bid > 0:
-                call_diff = call1_ask - call2_bid
-                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
-                    alert_key = f"{asset}_CALL_{strike1}_{strike2}_{self.active_expiry}"
-                    if self.can_alert(alert_key):
-                        profit = abs(call_diff)
-                        alerts.append(f"🔷 {asset} CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
-            
-            # PUT arbitrage
-            put1_bid = strikes[strike1]['put'].get('bid', 0)
-            put2_ask = strikes[strike2]['put'].get('ask', 0)
-            
-            if put1_bid > 0 and put2_ask > 0:
-                put_diff = put2_ask - put1_bid
-                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
-                    alert_key = f"{asset}_PUT_{strike1}_{strike2}_{self.active_expiry}"
-                    if self.can_alert(alert_key):
-                        profit = abs(put_diff)
-                        alerts.append(f"🟣 {asset} PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
+        # Check CALL arbitrage: Buy lower strike CALL, Sell higher strike CALL
+        if len(calls) >= 2:
+            sorted_call_strikes = sorted(calls.keys())
+            for i in range(len(sorted_call_strikes) - 1):
+                strike1 = sorted_call_strikes[i]
+                strike2 = sorted_call_strikes[i + 1]
+                
+                # CORRECT LOGIC: Lower strike ASK vs Higher strike BID
+                call1_ask = calls[strike1]['ask']
+                call2_bid = calls[strike2]['bid']
+                
+                if call1_ask > 0 and call2_bid > 0:
+                    # If we can buy lower strike for less than we can sell higher strike
+                    call_diff = call1_ask - call2_bid
+                    if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
+                        alert_key = f"{asset}_CALL_{strike1}_{strike2}_{self.active_expiry}"
+                        if self.can_alert(alert_key):
+                            profit = abs(call_diff)
+                            alerts.append(f"🔷 CALL Arbitrage: Buy {strike1:,} @ ${call1_ask:.2f}, Sell {strike2:,} @ ${call2_bid:.2f} → Profit: ${profit:.2f}")
+        
+        # Check PUT arbitrage: Sell lower strike PUT, Buy higher strike PUT
+        if len(puts) >= 2:
+            sorted_put_strikes = sorted(puts.keys())
+            for i in range(len(sorted_put_strikes) - 1):
+                strike1 = sorted_put_strikes[i]
+                strike2 = sorted_put_strikes[i + 1]
+                
+                # CORRECT LOGIC: Lower strike BID vs Higher strike ASK
+                put1_bid = puts[strike1]['bid']
+                put2_ask = puts[strike2]['ask']
+                
+                if put1_bid > 0 and put2_ask > 0:
+                    # If we can sell lower strike for more than we can buy higher strike
+                    put_diff = put2_ask - put1_bid
+                    if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
+                        alert_key = f"{asset}_PUT_{strike1}_{strike2}_{self.active_expiry}"
+                        if self.can_alert(alert_key):
+                            profit = abs(put_diff)
+                            alerts.append(f"🟣 PUT Arbitrage: Sell {strike1:,} @ ${put1_bid:.2f}, Buy {strike2:,} @ ${put2_ask:.2f} → Profit: ${profit:.2f}")
         
         if alerts:
             ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
@@ -451,12 +440,10 @@ class DeltaOptionsBot:
             self.ws.send(json.dumps(payload))
             print(f"[{datetime.now()}] 📡 Subscribed to {len(symbols)} {self.active_expiry} expiry symbols")
             
-            # Get current IST time
             now = datetime.now(timezone.utc)
             ist_now = now + timedelta(hours=5, minutes=30)
             current_time_ist = ist_now.strftime("%H:%M:%S IST")
             
-            # Send connection notification
             self.send_telegram(f"🔗 *Bot Connected*\n\n📅 Monitoring: {self.active_expiry}\n📊 Symbols: {len(symbols)}\n⏰ Time: {current_time_ist}\n\nBot is now live! 🚀")
 
     def can_alert(self, alert_key):
@@ -594,7 +581,7 @@ def start_bot():
 
 if __name__ == "__main__":
     print("="*50)
-    print("Delta Options Arbitrage Bot - COMPLETE VERSION")
+    print("Delta Options Arbitrage Bot - CORRECT ARBITRAGE LOGIC")
     print("="*50)
     
     start_bot()
