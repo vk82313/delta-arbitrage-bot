@@ -17,342 +17,201 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DELTA_THRESHOLD = 2  # BTC threshold set to 2
 ALERT_COOLDOWN = 60
 FETCH_INTERVAL = 1  # Fetch data every 1 second
-EXPIRY_CHECK_INTERVAL = 60  # Check every 1 minute for expiry rollover
 
 # -------------------------------
-# BTC Options Arbitrage Bot (API Only - Fixed)
+# BTC Options Bot (Based on Your Working Logic)
 # -------------------------------
-class BTCOptionsArbitrageBot:
+class BTCOptionsBot:
     def __init__(self):
         self.base_url = "https://api.india.delta.exchange/v2"
         self.last_alert_time = {}
-        self.options_prices = {}
         self.running = True
-        self.current_expiry = self.get_current_expiry()
-        self.active_expiry = self.get_initial_active_expiry()
         self.fetch_count = 0
         self.alert_count = 0
-        self.expiry_rollover_count = 0
-        self.last_expiry_check = 0
+        self.current_expiry = self.get_current_expiry()
 
     def get_current_expiry(self):
-        """Get current date in DDMMYY format"""
+        """Get current date in DDMMYY format (same as your GAS code)"""
         now = datetime.now(timezone.utc)
         ist_now = now + timedelta(hours=5, minutes=30)
         return ist_now.strftime("%d%m%y")
 
-    def get_initial_active_expiry(self):
-        """Determine which expiry should be active right now"""
-        now = datetime.now(timezone.utc)
-        ist_now = now + timedelta(hours=5, minutes=30)
-        
-        # If it's after 5:30 PM IST, we should already be on next day's expiry
-        if ist_now.hour >= 17 and ist_now.minute >= 30:
-            next_day = ist_now + timedelta(days=1)
-            next_expiry = next_day.strftime("%d%m%y")
-            print(f"[{datetime.now()}] 🕠 After 5:30 PM IST, starting with next expiry: {next_expiry}")
-            return next_expiry
-        else:
-            print(f"[{datetime.now()}] 📅 Starting with today's expiry: {self.current_expiry}")
-            return self.current_expiry
-
-    def should_rollover_expiry(self):
-        """Check if we should move to next expiry"""
-        now = datetime.now(timezone.utc)
-        ist_now = now + timedelta(hours=5, minutes=30)
-        
-        # After 5:30 PM IST, move to next day's expiry
-        if ist_now.hour >= 17 and ist_now.minute >= 30:
-            next_expiry = (ist_now + timedelta(days=1)).strftime("%d%m%y")
-            return next_expiry
-        return None
-
-    def get_available_expiries(self):
-        """Get all available BTC expiries from the API - FIXED"""
+    def fetch_tickers(self):
+        """Fetch all tickers in one call (like your working GAS code)"""
         try:
-            # Use the correct endpoint and parameters
             url = f"{self.base_url}/tickers"
-            params = {
-                'contract_types': 'call_options,put_options',
-                'underlying_asset_symbols': 'BTC'  # Required for BTC options
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
                 if data.get('success'):
-                    tickers = data.get('result', [])
-                    expiries = set()
-                    
-                    for ticker in tickers:
-                        symbol = ticker.get('symbol', '')
-                        if 'BTC' in symbol:
-                            expiry = self.extract_expiry_from_symbol(symbol)
-                            if expiry:
-                                expiries.add(expiry)
-                    
-                    return sorted(expiries)
+                    return data.get('result', [])
             return []
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error fetching BTC expiries: {e}")
+            print(f"[{datetime.now()}] ❌ Error fetching tickers: {e}")
             return []
 
-    def get_next_available_expiry(self, current_expiry):
-        """Get the next available expiry after current one"""
-        available_expiries = self.get_available_expiries()
-        if not available_expiries:
-            return current_expiry
-        
-        print(f"[{datetime.now()}] 📊 Available BTC expiries: {available_expiries}")
-        
-        # Find the first expiry that is > current expiry
-        for expiry in available_expiries:
-            if expiry > current_expiry:
-                return expiry
-        
-        # If no future expiry found, return the last available one
-        return available_expiries[-1]
+    def parse_expiry_code(self, code):
+        """Parse expiry code (same as your GAS function)"""
+        if not code:
+            return "N/A"
+        code = str(code)
+        if len(code) == 6 and code.isdigit():
+            dd = code[0:2]
+            mm = code[2:4]
+            yy = code[4:6]
+            return f"20{yy}-{mm}-{dd}"
+        return code
 
-    def check_and_update_expiry(self):
-        """Check if we need to update the active expiry"""
-        current_time = datetime.now().timestamp()
-        if current_time - self.last_expiry_check >= EXPIRY_CHECK_INTERVAL:
-            self.last_expiry_check = current_time
-            
-            # Get current time in IST
-            now = datetime.now(timezone.utc)
-            ist_now = now + timedelta(hours=5, minutes=30)
-            current_time_ist = ist_now.strftime("%H:%M:%S")
-            
-            print(f"[{datetime.now()}] 🔄 Checking BTC expiry rollover... (Current: {self.active_expiry}, Time: {current_time_ist} IST)")
-            
-            # Check if we should rollover to next expiry
-            next_expiry = self.should_rollover_expiry()
-            if next_expiry and next_expiry != self.active_expiry:
-                print(f"[{datetime.now()}] 🎯 BTC EXPIRY ROLLOVER TRIGGERED!")
-                print(f"[{datetime.now()}] 📅 Changing from {self.active_expiry} to {next_expiry}")
-                
-                # Get the actual next available expiry from API
-                actual_next_expiry = self.get_next_available_expiry(self.active_expiry)
-                
-                if actual_next_expiry != self.active_expiry:
-                    self.active_expiry = actual_next_expiry
-                    self.expiry_rollover_count += 1
-                    
-                    # Reset data for new expiry
-                    self.options_prices = {}
-                    
-                    # Send Telegram notification
-                    self.send_telegram(f"🔄 *BTC Expiry Rollover Complete!*\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_ist} IST\n\nBot automatically switched to new expiry! ✅")
-                    return True
-                else:
-                    print(f"[{datetime.now()}] ⚠️ No new BTC expiry available yet, keeping: {self.active_expiry}")
-            
-            # Also check if current expiry is still available
-            available_expiries = self.get_available_expiries()
-            if available_expiries and self.active_expiry not in available_expiries:
-                print(f"[{datetime.now()}] ⚠️ Current BTC expiry {self.active_expiry} no longer available!")
-                next_available = self.get_next_available_expiry(self.active_expiry)
-                if next_available != self.active_expiry:
-                    print(f"[{datetime.now()}] 🔄 Switching to available BTC expiry: {next_available}")
-                    self.active_expiry = next_available
-                    self.expiry_rollover_count += 1
-                    
-                    # Reset data
-                    self.options_prices = {}
-                    
-                    self.send_telegram(f"🔄 *BTC Expiry Update*\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_ist} IST\n\nPrevious expiry no longer available! ✅")
-                    return True
-        
-        return False
-
-    def extract_expiry_from_symbol(self, symbol):
-        """Extract expiry date from symbol string"""
+    def extract_strike_from_symbol(self, symbol):
+        """Extract strike price from symbol (like your GAS code)"""
         try:
             parts = symbol.split('-')
-            if len(parts) >= 4:
-                return parts[3]  # Format: C-BTC-STRIKE-EXPIRY or P-BTC-STRIKE-EXPIRY
-            return None
-        except:
-            return None
-
-    def extract_strike(self, symbol):
-        """Extract strike price from symbol"""
-        try:
-            parts = symbol.split('-')
-            if len(parts) >= 4:
-                return int(parts[2])  # Strike is the third part
+            for part in parts:
+                if part.isdigit() and len(part) > 2:  # Strike prices are usually > 100
+                    return int(part)
             return 0
         except:
             return 0
 
-    def fetch_btc_options_data(self):
-        """Fetch BTC options data from API every second - FIXED ENDPOINT"""
-        try:
-            # Use the correct endpoint with proper parameters
-            url = f"{self.base_url}/tickers"
-            params = {
-                'contract_types': 'call_options,put_options',
-                'underlying_asset_symbols': 'BTC'  # Required parameter for BTC options
-            }
-            
-            response = requests.get(url, params=params, timeout=5)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    tickers = data.get('result', [])
-                    
-                    # Process all BTC options (we'll filter by expiry in process_tickers_data)
-                    self.process_tickers_data(tickers)
-                    self.fetch_count += 1
-                    
-                    if self.fetch_count % 30 == 0:  # Log every 30 fetches
-                        print(f"[{datetime.now()}] 🔄 Fetched BTC data {self.fetch_count} times, tracking {len(self.options_prices)} {self.active_expiry} symbols")
-                    
-                    return True
-                else:
-                    print(f"[{datetime.now()}] ❌ API response not successful: {data}")
-                    return False
-            else:
-                print(f"[{datetime.now()}] ❌ API Error: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error fetching BTC data: {e}")
-            return False
+    def detect_option_type(self, symbol):
+        """Detect if option is CALL or PUT (like your GAS logic)"""
+        symbol_str = str(symbol).upper()
+        
+        # Check first part for C or P (like your GAS code)
+        parts = symbol_str.split('-')
+        if len(parts) > 0:
+            first_part = parts[0]
+            if first_part.startswith('C'):
+                return 'call'
+            elif first_part.startswith('P'):
+                return 'put'
+        
+        # Fallback to string search
+        if 'C-' in symbol_str or '/C' in symbol_str:
+            return 'call'
+        elif 'P-' in symbol_str or '/P' in symbol_str:
+            return 'put'
+        
+        return 'unknown'
 
-    def process_tickers_data(self, tickers):
-        """Process tickers data and update options prices - FIXED"""
+    def get_bid_ask_prices(self, ticker):
+        """Extract bid/ask prices from ticker (like your GAS code)"""
         try:
-            current_prices = {}
+            # Try multiple possible fields (like your GAS code)
+            quotes = ticker.get('quotes', {})
             
-            for ticker in tickers:
-                symbol = ticker.get('symbol', '')
-                
-                # Only process BTC options with active expiry
-                if 'BTC' in symbol:
-                    symbol_expiry = self.extract_expiry_from_symbol(symbol)
-                    if symbol_expiry == self.active_expiry:
-                        mark_price = ticker.get('mark_price')
+            bid = (ticker.get('best_bid_price') or 
+                  ticker.get('best_bid') or 
+                  quotes.get('best_bid') or 
+                  quotes.get('bid_price') or 
+                  ticker.get('bid'))
+            
+            ask = (ticker.get('best_ask_price') or 
+                  ticker.get('best_ask') or 
+                  quotes.get('best_ask') or 
+                  quotes.get('ask_price') or 
+                  ticker.get('ask'))
+            
+            mark = ticker.get('mark_price') or ticker.get('last_price') or ticker.get('close')
+            
+            # Convert to float, return 0 if invalid
+            bid_price = float(bid) if bid and str(bid).replace('.', '').isdigit() else 0
+            ask_price = float(ask) if ask and str(ask).replace('.', '').isdigit() else 0
+            mark_price = float(mark) if mark and str(mark).replace('.', '').isdigit() else 0
+            
+            return bid_price, ask_price, mark_price
+            
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Error parsing prices: {e}")
+            return 0, 0, 0
+
+    def process_btc_options(self):
+        """Process BTC options data (main logic similar to your GAS code)"""
+        tickers = self.fetch_tickers()
+        if not tickers:
+            return {}
+        
+        # Group by strike (like your GAS code)
+        grouped = {}
+        
+        for ticker in tickers:
+            symbol = ticker.get('symbol', '')
+            
+            # Filter for BTC options with current expiry
+            if 'BTC' in symbol.upper():
+                parts = symbol.split('-')
+                if len(parts) >= 4:
+                    expiry_raw = parts[-1]
+                    expiry = self.parse_expiry_code(expiry_raw)
+                    
+                    # Only process current expiry options
+                    if expiry_raw == self.current_expiry:
+                        strike = self.extract_strike_from_symbol(symbol)
+                        option_type = self.detect_option_type(symbol)
                         
-                        # Use mark_price as reference, fallback to bid/ask
-                        if mark_price and float(mark_price) > 0:
-                            current_prices[symbol] = {
-                                'bid': float(ticker.get('quotes', {}).get('best_bid', 0)) or float(mark_price) * 0.99,
-                                'ask': float(ticker.get('quotes', {}).get('best_ask', 0)) or float(mark_price) * 1.01,
-                                'mark_price': float(mark_price)
-                            }
-                        else:
-                            # If no mark price, use bid/ask directly
-                            bid_price = float(ticker.get('quotes', {}).get('best_bid', 0))
-                            ask_price = float(ticker.get('quotes', {}).get('best_ask', 0))
-                            if bid_price > 0 and ask_price > 0:
-                                current_prices[symbol] = {
-                                    'bid': bid_price,
-                                    'ask': ask_price,
-                                    'mark_price': (bid_price + ask_price) / 2
+                        if strike > 0 and option_type in ['call', 'put']:
+                            if strike not in grouped:
+                                grouped[strike] = {
+                                    'strike': strike,
+                                    'expiry': expiry,
+                                    'call': {'bid': 0, 'ask': 0, 'mark': 0},
+                                    'put': {'bid': 0, 'ask': 0, 'mark': 0}
                                 }
-            
-            # Update options prices
-            self.options_prices = current_prices
-            
-            # Check for arbitrage opportunities
-            self.check_arbitrage_opportunities()
-            
-        except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error processing BTC tickers data: {e}")
+                            
+                            bid, ask, mark = self.get_bid_ask_prices(ticker)
+                            
+                            if option_type == 'call':
+                                grouped[strike]['call']['bid'] = bid
+                                grouped[strike]['call']['ask'] = ask
+                                grouped[strike]['call']['mark'] = mark
+                            else:  # put
+                                grouped[strike]['put']['bid'] = bid
+                                grouped[strike]['put']['ask'] = ask
+                                grouped[strike]['put']['mark'] = mark
+        
+        return grouped
 
-    def check_arbitrage_opportunities(self):
-        """Check for arbitrage opportunities - BTC ONLY"""
-        if len(self.options_prices) < 10:
-            return
-            
-        btc_options = []
+    def check_arbitrage_opportunities(self, grouped_data):
+        """Check for arbitrage (same logic as your working GAS code)"""
+        if not grouped_data:
+            return []
         
-        for symbol, prices in self.options_prices.items():
-            # Only process BTC symbols with active expiry
-            if 'BTC' in symbol:
-                option_data = {
-                    'symbol': symbol,
-                    'bid': prices['bid'],
-                    'ask': prices['ask']
-                }
-                btc_options.append(option_data)
-        
-        # Check arbitrage for BTC only
-        if btc_options:
-            self.check_arbitrage_same_expiry(btc_options)
-
-    def check_arbitrage_same_expiry(self, options):
-        """Check for arbitrage opportunities within ACTIVE expiry - BTC ONLY"""
-        strikes = {}
-        for option in options:
-            strike = self.extract_strike(option['symbol'])
-            if strike > 0:
-                if strike not in strikes:
-                    strikes[strike] = {'call': {}, 'put': {}}
-                
-                if 'C-' in option['symbol']:
-                    strikes[strike]['call'] = {
-                        'bid': option['bid'], 
-                        'ask': option['ask'],
-                        'symbol': option['symbol']
-                    }
-                elif 'P-' in option['symbol']:
-                    strikes[strike]['put'] = {
-                        'bid': option['bid'], 
-                        'ask': option['ask'],
-                        'symbol': option['symbol']
-                    }
-        
-        sorted_strikes = sorted(strikes.keys())
-        
-        if len(sorted_strikes) < 2:
-            return
-        
+        strikes = sorted(grouped_data.keys())
         alerts = []
         
-        for i in range(len(sorted_strikes) - 1):
-            strike1 = sorted_strikes[i]
-            strike2 = sorted_strikes[i + 1]
+        for i in range(len(strikes) - 1):
+            strike1 = strikes[i]
+            strike2 = strikes[i + 1]
             
-            # CALL arbitrage: Buy lower strike call, sell higher strike call
-            call1_ask = strikes[strike1]['call'].get('ask', 0)
-            call2_bid = strikes[strike2]['call'].get('bid', 0)
+            g1 = grouped_data[strike1]
+            g2 = grouped_data[strike2]
+            
+            # CALL arbitrage: call1_ask - call2_bid
+            call1_ask = g1['call']['ask']
+            call2_bid = g2['call']['bid']
             
             if call1_ask > 0 and call2_bid > 0:
                 call_diff = call1_ask - call2_bid
                 if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD:
-                    alert_key = f"BTC_CALL_{strike1}_{strike2}_{self.active_expiry}"
+                    alert_key = f"BTC_CALL_{strike1}_{strike2}"
                     if self.can_alert(alert_key):
                         profit = abs(call_diff)
                         alerts.append(f"🔷 BTC CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
             
-            # PUT arbitrage: Buy higher strike put, sell lower strike put
-            put1_bid = strikes[strike1]['put'].get('bid', 0)
-            put2_ask = strikes[strike2]['put'].get('ask', 0)
+            # PUT arbitrage: put2_ask - put1_bid
+            put1_bid = g1['put']['bid']
+            put2_ask = g2['put']['ask']
             
             if put1_bid > 0 and put2_ask > 0:
                 put_diff = put2_ask - put1_bid
                 if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD:
-                    alert_key = f"BTC_PUT_{strike1}_{strike2}_{self.active_expiry}"
+                    alert_key = f"BTC_PUT_{strike1}_{strike2}"
                     if self.can_alert(alert_key):
                         profit = abs(put_diff)
                         alerts.append(f"🟣 BTC PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
         
-        if alerts:
-            ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-            current_time_ist = ist_now.strftime("%H:%M:%S")
-            
-            message = f"🚨 *BTC {self.active_expiry} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
-            message += f"\n\n_Expiry: {self.active_expiry}_"
-            message += f"\n_Time: {current_time_ist} IST_"
-            message += f"\n_Threshold: ${DELTA_THRESHOLD}_"
-            self.send_telegram(message)
-            self.alert_count += len(alerts)
-            print(f"[{datetime.now()}] ✅ Sent {len(alerts)} BTC arbitrage alerts for {self.active_expiry}")
+        return alerts
 
     def can_alert(self, alert_key):
         """Check if we can send alert (cooldown)"""
@@ -368,6 +227,7 @@ class BTCOptionsArbitrageBot:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             print(f"[{datetime.now()}] 📱 Telegram not configured, would send: {message}")
             return
+        
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             resp = requests.post(url, data={
@@ -378,33 +238,46 @@ class BTCOptionsArbitrageBot:
             if resp.status_code == 200:
                 print(f"[{datetime.now()}] 📱 Telegram alert sent")
             else:
-                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}: {resp.text}")
+                print(f"[{datetime.now()}] ❌ Telegram error {resp.status_code}")
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Telegram error: {e}")
 
-    def start_fetching(self):
-        """Start fetching BTC data every second"""
-        print(f"[{datetime.now()}] 🤖 Starting BTC Options Arbitrage Bot (API Mode)...")
-        print(f"[{datetime.now()}] 📅 Active BTC expiry: {self.active_expiry}")
+    def start_monitoring(self):
+        """Start monitoring BTC options"""
+        print(f"[{datetime.now()}] 🤖 Starting BTC Options Bot")
+        print(f"[{datetime.now()}] 📅 Current expiry: {self.current_expiry}")
         print(f"[{datetime.now()}] ⚡ BTC Threshold: ${DELTA_THRESHOLD}")
         
         # Send startup notification
-        ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-        current_time_ist = ist_now.strftime("%H:%M:%S IST")
-        self.send_telegram(f"🔗 *BTC Bot Started (API Mode)*\n\n📅 Monitoring: {self.active_expiry}\n⚡ Threshold: ${DELTA_THRESHOLD}\n⏰ Time: {current_time_ist}\n\nBTC Bot is now live! 🚀")
+        self.send_telegram(f"🔗 *BTC Bot Started*\n\n📅 Monitoring expiry: {self.current_expiry}\n⚡ Threshold: ${DELTA_THRESHOLD}\n⏰ Started at: {datetime.now().strftime('%H:%M:%S IST')}")
         
         while self.running:
             try:
-                # Check expiry rollover
-                self.check_and_update_expiry()
+                # Fetch and process data
+                grouped_data = self.process_btc_options()
+                self.fetch_count += 1
                 
-                # Fetch BTC options data
-                success = self.fetch_btc_options_data()
+                # Check for arbitrage
+                alerts = self.check_arbitrage_opportunities(grouped_data)
                 
-                if not success:
-                    print(f"[{datetime.now()}] ⚠️ Failed to fetch BTC data, retrying...")
+                if alerts:
+                    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                    current_time_ist = ist_now.strftime("%H:%M:%S")
+                    
+                    message = f"🚨 *BTC {self.current_expiry} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
+                    message += f"\n\n_Expiry: {self.current_expiry}_"
+                    message += f"\n_Time: {current_time_ist} IST_"
+                    message += f"\n_Threshold: ${DELTA_THRESHOLD}_"
+                    
+                    self.send_telegram(message)
+                    self.alert_count += len(alerts)
+                    print(f"[{datetime.now()}] ✅ Sent {len(alerts)} BTC arbitrage alerts")
                 
-                # Wait for 1 second before next fetch
+                # Log progress
+                if self.fetch_count % 30 == 0:
+                    strike_count = len(grouped_data)
+                    print(f"[{datetime.now()}] 🔄 Fetched {self.fetch_count} times | Strikes: {strike_count} | Alerts: {self.alert_count}")
+                
                 sleep(FETCH_INTERVAL)
                 
             except Exception as e:
@@ -419,79 +292,40 @@ class BTCOptionsArbitrageBot:
 # -------------------------------
 # Flask Routes
 # -------------------------------
-bot = BTCOptionsArbitrageBot()
+bot = BTCOptionsBot()
 
 @app.route('/')
 def home():
     status = "✅ Running" if bot.running else "🔴 Stopped"
-    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    current_time_ist = ist_now.strftime("%Y-%m-%d %H:%M:%S IST")
-    
-    calls_count = len([s for s in bot.options_prices.keys() if 'C-' in s])
-    puts_count = len([s for s in bot.options_prices.keys() if 'P-' in s])
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
     
     return f"""
-    <h1>BTC Options Arbitrage Bot (API Mode)</h1>
+    <h1>BTC Options Arbitrage Bot</h1>
     <p>Status: {status}</p>
     <p>API Fetches: {bot.fetch_count}</p>
-    <p>BTC Symbols Tracked: {len(bot.options_prices)} (Calls: {calls_count}, Puts: {puts_count})</p>
-    <p>Active BTC Expiry: {bot.active_expiry}</p>
     <p>BTC Alerts Sent: {bot.alert_count}</p>
-    <p>BTC Expiry Rollovers: {bot.expiry_rollover_count}</p>
+    <p>Current Expiry: {bot.current_expiry}</p>
     <p>BTC Threshold: ${DELTA_THRESHOLD}</p>
-    <p>Last Update: {current_time_ist}</p>
-    <p><a href="/health">Health Check</a> | <a href="/debug">Debug Info</a></p>
+    <p>Last Update: {current_time}</p>
+    <p><a href="/health">Health Check</a></p>
     """
 
 @app.route('/health')
 def health():
-    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    current_time_ist = ist_now.strftime("%Y-%m-%d %H:%M:%S IST")
-    
-    calls_count = len([s for s in bot.options_prices.keys() if 'C-' in s])
-    puts_count = len([s for s in bot.options_prices.keys() if 'P-' in s])
-    
     return {
         "status": "healthy", 
         "bot_running": bot.running, 
         "api_fetches": bot.fetch_count,
-        "btc_symbols_tracked": len(bot.options_prices),
-        "btc_calls_tracked": calls_count,
-        "btc_puts_tracked": puts_count,
-        "active_btc_expiry": bot.active_expiry,
         "btc_alerts_sent": bot.alert_count,
-        "btc_expiry_rollovers": bot.expiry_rollover_count,
-        "btc_threshold": DELTA_THRESHOLD,
-        "current_time_ist": current_time_ist
+        "current_expiry": bot.current_expiry,
+        "btc_threshold": DELTA_THRESHOLD
     }, 200
-
-@app.route('/debug')
-def debug():
-    """Debug endpoint"""
-    ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    current_time_ist = ist_now.strftime("%Y-%m-%d %H:%M:%S IST")
-    
-    available_expiries = bot.get_available_expiries()
-    sample_prices = dict(list(bot.options_prices.items())[:5])
-    
-    return {
-        "bot_running": bot.running,
-        "api_fetches": bot.fetch_count,
-        "btc_symbols_tracked": len(bot.options_prices),
-        "active_btc_expiry": bot.active_expiry,
-        "available_btc_expiries": available_expiries,
-        "btc_expiry_rollovers": bot.expiry_rollover_count,
-        "btc_alerts_sent": bot.alert_count,
-        "btc_threshold": DELTA_THRESHOLD,
-        "current_time_ist": current_time_ist,
-        "sample_btc_prices": sample_prices
-    }
 
 @app.route('/start')
 def start_bot():
     if not bot.running:
         bot.running = True
-        bot_thread = threading.Thread(target=bot.start_fetching)
+        bot_thread = threading.Thread(target=bot.start_monitoring)
         bot_thread.daemon = True
         bot_thread.start()
         return "Bot started", 200
@@ -509,24 +343,20 @@ def ping():
 # -------------------------------
 # Start Bot
 # -------------------------------
-def start_bot():
-    print("="*60)
-    print("BTC Options Arbitrage Bot - API Mode (FIXED)")
-    print("="*60)
+if __name__ == "__main__":
+    print("="*50)
+    print("BTC Options Arbitrage Bot")
+    print("="*50)
     print(f"⚡ BTC Threshold: ${DELTA_THRESHOLD}")
-    print(f"📅 Starting BTC expiry: {bot.active_expiry}")
-    print(f"🔄 Fetch interval: {FETCH_INTERVAL} second")
-    print("="*60)
+    print(f"📅 Current expiry: {bot.current_expiry}")
+    print("="*50)
     
-    bot_thread = threading.Thread(target=bot.start_fetching)
+    # Start the bot
+    bot_thread = threading.Thread(target=bot.start_monitoring)
     bot_thread.daemon = True
     bot_thread.start()
-    print(f"[{datetime.now()}] ✅ BTC Bot thread started")
-
-if __name__ == "__main__":
-    start_bot()
-    sleep(2)
     
+    # Start Flask app
     port = int(os.environ.get("PORT", 10000))
     print(f"[{datetime.now()}] 🚀 Starting web server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
