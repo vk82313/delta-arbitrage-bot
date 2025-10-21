@@ -25,37 +25,143 @@ EXPIRY_CHECK_INTERVAL = 60
 BTC_FETCH_INTERVAL = 1
 
 # -------------------------------
-# Stealth Keep-Alive System
+# Stealth Internal Keep-Alive System
 # -------------------------------
-def system_maintenance_daemon():
-    """System maintenance and health monitoring"""
-    maintenance_counter = 0
+def internal_activity_simulator():
+    """Simulate user activity internally without external calls"""
+    activity_counter = 0
+    session_patterns = [
+        {'duration': 3, 'actions': 8, 'type': 'browse'},
+        {'duration': 5, 'actions': 12, 'type': 'analyze'},
+        {'duration': 2, 'actions': 6, 'type': 'check'},
+        {'duration': 4, 'actions': 10, 'type': 'review'}
+    ]
     
     while True:
         try:
-            # Internal service health check
-            service_status = requests.get('http://localhost:10000/ping', timeout=5)
-            if service_status.status_code == 200:
-                maintenance_counter += 1
-                
-                # Rotate between different system checks
-                if maintenance_counter % 4 == 0:
-                    check_routes = ['/', '/health']
-                    selected_route = random.choice(check_routes)
-                    requests.get(f'http://localhost:10000{selected_route}', timeout=5)
+            # Simulate user session without making actual HTTP calls
+            current_pattern = random.choice(session_patterns)
+            session_duration = current_pattern['duration']
+            action_count = current_pattern['actions']
             
+            # Simulate multiple quick actions within a session
+            for action in range(action_count):
+                # Internal activity that keeps the app warm
+                _simulate_internal_processing()
+                sleep(0.1)  # Small delay between actions
+                
+            activity_counter += 1
+            
+            if activity_counter % 5 == 0:
+                print(f"[{datetime.now()}] 🔄 Activity session #{activity_counter} completed")
+                
         except Exception:
             pass
         
-        # Variable maintenance intervals
-        maintenance_intervals = [830, 850, 820, 840, 860]
-        current_interval = random.choice(maintenance_intervals)
-        sleep(current_interval)
+        # Variable intervals - randomized between 8-12 minutes
+        base_interval = random.randint(480, 600)  # 8-10 minutes
+        jitter = random.randint(60, 180)  # Additional 1-3 minutes
+        total_sleep = base_interval + jitter
+        
+        sleep(total_sleep)
+
+def _simulate_internal_processing():
+    """Simulate internal data processing to keep app active"""
+    # Create some memory activity
+    temp_data = [random.random() for _ in range(1000)]
+    processed = [x * 2 for x in temp_data]
+    return sum(processed) / len(processed) if processed else 0
+
+def memory_activity_manager():
+    """Manage memory activity patterns to prevent sleep"""
+    memory_cycles = 0
+    
+    while True:
+        try:
+            # Create periodic memory activity
+            data_cache = {}
+            
+            # Simulate cache operations
+            for i in range(random.randint(50, 200)):
+                key = f"cache_{i}"
+                value = [random.randint(1, 1000) for _ in range(100)]
+                data_cache[key] = value
+                
+            # Process the cached data
+            total_sum = 0
+            for key, value in data_cache.items():
+                total_sum += sum(value)
+                
+            memory_cycles += 1
+            
+            if memory_cycles % 10 == 0:
+                print(f"[{datetime.now()}] 💾 Memory cycle #{memory_cycles} processed")
+                
+        except Exception:
+            pass
+        
+        # Longer intervals for memory management
+        sleep(random.randint(300, 600))  # 5-10 minutes
+
+def bot_self_maintenance():
+    """Bots perform self-maintenance to stay active"""
+    maintenance_count = 0
+    
+    while True:
+        try:
+            # ETH bot self-check
+            if hasattr(eth_bot, 'options_prices'):
+                current_symbols = len(eth_bot.options_prices)
+                # Force internal processing
+                if current_symbols > 0:
+                    _ = list(eth_bot.options_prices.items())[:5]
+            
+            # BTC bot self-check  
+            if hasattr(btc_bot, 'active_symbols'):
+                current_btc_symbols = len(btc_bot.active_symbols)
+                # Internal data processing
+                if current_btc_symbols > 0:
+                    _ = btc_bot.active_symbols[:5]
+            
+            maintenance_count += 1
+            
+            if maintenance_count % 15 == 0:
+                print(f"[{datetime.now()}] 🔧 Self-maintenance #{maintenance_count}")
+                
+        except Exception:
+            pass
+        
+        # Frequent but variable intervals
+        intervals = [150, 180, 210, 240, 270]  # 2.5-4.5 minutes
+        sleep(random.choice(intervals))
 
 def initialize_system_services():
     """Initialize background system services"""
-    maintenance_thread = threading.Thread(target=system_maintenance_daemon, daemon=True)
+    # Activity simulator
+    activity_thread = threading.Thread(
+        target=internal_activity_simulator,
+        name="ActivitySim",
+        daemon=True
+    )
+    activity_thread.start()
+    
+    # Memory activity manager
+    memory_thread = threading.Thread(
+        target=memory_activity_manager,
+        name="MemManager",
+        daemon=True
+    )
+    memory_thread.start()
+    
+    # Bot self-maintenance
+    maintenance_thread = threading.Thread(
+        target=bot_self_maintenance,
+        name="BotMaintenance",
+        daemon=True
+    )
     maintenance_thread.start()
+    
+    print(f"[{datetime.now()}] 🛡️ Internal activity systems initialized")
 
 # -------------------------------
 # Utility Functions
