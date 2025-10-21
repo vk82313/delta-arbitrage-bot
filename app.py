@@ -4,17 +4,19 @@ import requests
 import os
 from datetime import datetime, timedelta, timezone
 from time import sleep
-from flask import Flask
+from flask import Flask, request
 import threading
 
 # Initialize Flask app
 app = Flask(__name__)
 
 # -------------------------------
-# Configuration
+# Configuration & Global State
 # -------------------------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Global thresholds - can be updated live
 DELTA_THRESHOLD = {"ETH": 0.16, "BTC": 2}
 ALERT_COOLDOWN = 60
 PROCESS_INTERVAL = 2
@@ -29,13 +31,30 @@ def get_ist_time():
     utc_now = datetime.now(timezone.utc)
     ist_offset = timedelta(hours=5, minutes=30)
     ist_time = utc_now + ist_offset
-    return ist_time.strftime("%H:%M:%S IST")
+    return ist_time.strftime("%H:%M:%S")
 
 def get_current_expiry():
     """Get current date in DDMMYY format"""
     utc_now = datetime.now(timezone.utc)
     ist_now = utc_now + timedelta(hours=5, minutes=30)
     return ist_now.strftime("%d%m%y")
+
+def format_expiry_display(expiry_code):
+    """Convert DDMMYY to DD MMM YY format"""
+    try:
+        day = expiry_code[:2]
+        month = expiry_code[2:4]
+        year = "20" + expiry_code[4:6]
+        
+        month_names = {
+            '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr',
+            '05': 'May', '06': 'Jun', '07': 'Jul', '08': 'Aug',
+            '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec'
+        }
+        
+        return f"{day} {month_names[month]} {year}"
+    except:
+        return expiry_code
 
 def send_telegram(message):
     """Send Telegram message"""
@@ -84,7 +103,7 @@ class ETHWebSocketBot:
         if ist_now.hour >= 17 and ist_now.minute >= 30:
             next_day = ist_now + timedelta(days=1)
             next_expiry = next_day.strftime("%d%m%y")
-            print(f"[{datetime.now()}] 🕠 ETH: After 5:30 PM IST, starting with next expiry: {next_expiry}")
+            print(f"[{datetime.now()}] 🕠 ETH: After 5:30 PM, starting with next expiry: {next_expiry}")
             return next_expiry
         else:
             print(f"[{datetime.now()}] 📅 ETH: Starting with today's expiry: {self.current_expiry}")
@@ -148,8 +167,8 @@ class ETHWebSocketBot:
         if current_time - self.last_expiry_check >= EXPIRY_CHECK_INTERVAL:
             self.last_expiry_check = current_time
             
-            current_time_ist = get_ist_time()
-            print(f"[{datetime.now()}] 🔄 ETH: Checking expiry rollover... (Current: {self.active_expiry}, Time: {current_time_ist})")
+            current_time_str = get_ist_time()
+            print(f"[{datetime.now()}] 🔄 ETH: Checking expiry rollover... (Current: {self.active_expiry}, Time: {current_time_str})")
             
             next_expiry = self.should_rollover_expiry()
             if next_expiry and next_expiry != self.active_expiry:
@@ -168,7 +187,7 @@ class ETHWebSocketBot:
                     if self.connected and self.ws:
                         self.subscribe_to_options()
                     
-                    send_telegram(f"🔄 *ETH Expiry Rollover Complete!*\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_ist}\n\nBot automatically switched to new expiry! ✅")
+                    send_telegram(f"🔄 ETH Expiry Rollover Complete!\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_str}")
                     return True
                 else:
                     print(f"[{datetime.now()}] ⚠️ ETH: No new expiry available yet, keeping: {self.active_expiry}")
@@ -188,7 +207,7 @@ class ETHWebSocketBot:
                     if self.connected and self.ws:
                         self.subscribe_to_options()
                     
-                    send_telegram(f"🔄 *ETH Expiry Update*\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_ist}\n\nPrevious expiry no longer available! ✅")
+                    send_telegram(f"🔄 ETH Expiry Update!\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_str}")
                     return True
         
         return False
@@ -357,9 +376,9 @@ class ETHWebSocketBot:
                 eth_options.append(option_data)
         
         if eth_options:
-            self.check_arbitrage_same_expiry('ETH', eth_options)
+            self.check_arbitrage_same_expiry(eth_options)
 
-    def check_arbitrage_same_expiry(self, asset, options):
+    def check_arbitrage_same_expiry(self, options):
         """Check for arbitrage opportunities within ACTIVE expiry"""
         strikes = {}
         for option in options:
@@ -398,11 +417,15 @@ class ETHWebSocketBot:
             
             if call1_ask > 0 and call2_bid > 0:
                 call_diff = call1_ask - call2_bid
-                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD[asset]:
+                if call_diff < 0 and abs(call_diff) >= DELTA_THRESHOLD["ETH"]:
                     alert_key = f"ETH_CALL_{strike1}_{strike2}_{self.active_expiry}"
                     if self.can_alert(alert_key):
                         profit = abs(call_diff)
-                        alerts.append(f"🔷 ETH CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
+                        expiry_display = format_expiry_display(self.active_expiry)
+                        current_time = get_ist_time()
+                        
+                        alert_msg = f"🔵 ETH Alert Call\n{strike1} (B) → {strike2} (S)\n${call1_ask:.2f}    ${call2_bid:.2f}\nProfit: ${profit:.2f}\n{expiry_display} | {current_time}"
+                        alerts.append(alert_msg)
             
             # PUT arbitrage
             put1_bid = strikes[strike1]['put'].get('bid', 0)
@@ -410,23 +433,21 @@ class ETHWebSocketBot:
             
             if put1_bid > 0 and put2_ask > 0:
                 put_diff = put2_ask - put1_bid
-                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD[asset]:
+                if put_diff < 0 and abs(put_diff) >= DELTA_THRESHOLD["ETH"]:
                     alert_key = f"ETH_PUT_{strike1}_{strike2}_{self.active_expiry}"
                     if self.can_alert(alert_key):
                         profit = abs(put_diff)
-                        alerts.append(f"🟣 ETH PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
+                        expiry_display = format_expiry_display(self.active_expiry)
+                        current_time = get_ist_time()
+                        
+                        alert_msg = f"🔵 ETH Alert Put\n{strike2} (B) → {strike1} (S)\n${put2_ask:.2f}    ${put1_bid:.2f}\nProfit: ${profit:.2f}\n{expiry_display} | {current_time}"
+                        alerts.append(alert_msg)
         
         if alerts:
-            current_time_ist = get_ist_time()
-            
-            message = f"🚨 *ETH {self.active_expiry} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
-            message += f"\n\n_Expiry: {self.active_expiry}_"
-            message += f"\n_Time: {current_time_ist}_"
-            message += f"\n_Threshold: ${DELTA_THRESHOLD['ETH']}_"
-            
-            send_telegram(message)
-            self.alert_count += len(alerts)
-            print(f"[{datetime.now()}] ✅ ETH: Sent {len(alerts)} arbitrage alerts for {self.active_expiry}")
+            for alert in alerts:
+                send_telegram(alert)
+                self.alert_count += 1
+                print(f"[{datetime.now()}] ✅ ETH: Sent arbitrage alert")
 
     def subscribe_to_options(self):
         """Subscribe to ACTIVE ETH expiry options"""
@@ -454,8 +475,8 @@ class ETHWebSocketBot:
             self.ws.send(json.dumps(payload))
             print(f"[{datetime.now()}] 📡 ETH: Subscribed to {len(symbols)} {self.active_expiry} expiry symbols")
             
-            current_time_ist = get_ist_time()
-            send_telegram(f"🔗 *ETH Bot Connected*\n\n📅 Monitoring: {self.active_expiry}\n📊 Symbols: {len(symbols)}\n⏰ Time: {current_time_ist}\n\nETH Bot is now live! 🚀")
+            current_time_str = get_ist_time()
+            send_telegram(f"🔗 ETH Bot Connected\n\n📅 Monitoring: {self.active_expiry}\n📊 Symbols: {len(symbols)}\n⏰ Time: {current_time_str}\n\nETH Bot is now live! 🚀")
 
     def can_alert(self, alert_key):
         """Check if we can send alert (cooldown)"""
@@ -504,7 +525,146 @@ class BTCRESTBot:
         self.fetch_count = 0
         self.alert_count = 0
         self.current_expiry = get_current_expiry()
+        self.active_expiry = self.get_initial_active_expiry()
+        self.active_symbols = []
+        self.last_expiry_check = 0
+        self.expiry_rollover_count = 0
         self.last_debug_log = 0
+        self.options_prices = {}  # Track BTC symbols
+
+    def get_initial_active_expiry(self):
+        """Determine which expiry should be active right now"""
+        now = datetime.now(timezone.utc)
+        ist_now = now + timedelta(hours=5, minutes=30)
+        
+        if ist_now.hour >= 17 and ist_now.minute >= 30:
+            next_day = ist_now + timedelta(days=1)
+            next_expiry = next_day.strftime("%d%m%y")
+            print(f"[{datetime.now()}] 🕠 BTC: After 5:30 PM, starting with next expiry: {next_expiry}")
+            return next_expiry
+        else:
+            print(f"[{datetime.now()}] 📅 BTC: Starting with today's expiry: {self.current_expiry}")
+            return self.current_expiry
+
+    def should_rollover_expiry(self):
+        """Check if we should move to next expiry"""
+        now = datetime.now(timezone.utc)
+        ist_now = now + timedelta(hours=5, minutes=30)
+        
+        if ist_now.hour >= 17 and ist_now.minute >= 30:
+            next_expiry = (ist_now + timedelta(days=1)).strftime("%d%m%y")
+            return next_expiry
+        return None
+
+    def get_available_expiries(self):
+        """Get all available BTC expiries from the API"""
+        try:
+            url = f"{self.base_url}/tickers"
+            params = {
+                'contract_types': 'call_options,put_options',
+                'underlying_asset_symbols': 'BTC'
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    tickers = data.get('result', [])
+                    expiries = set()
+                    
+                    for ticker in tickers:
+                        symbol = ticker.get('symbol', '')
+                        if 'BTC' in symbol:
+                            expiry = self.extract_expiry_from_symbol(symbol)
+                            if expiry:
+                                expiries.add(expiry)
+                    
+                    return sorted(expiries)
+            return []
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ BTC: Error fetching expiries: {e}")
+            return []
+
+    def get_next_available_expiry(self, current_expiry):
+        """Get the next available expiry after current one"""
+        available_expiries = self.get_available_expiries()
+        if not available_expiries:
+            return current_expiry
+        
+        print(f"[{datetime.now()}] 📊 BTC: Available expiries: {available_expiries}")
+        
+        for expiry in available_expiries:
+            if expiry > current_expiry:
+                return expiry
+        
+        return available_expiries[-1]
+
+    def check_and_update_expiry(self):
+        """Check if we need to update the active expiry"""
+        current_time = datetime.now().timestamp()
+        if current_time - self.last_expiry_check >= EXPIRY_CHECK_INTERVAL:
+            self.last_expiry_check = current_time
+            
+            current_time_str = get_ist_time()
+            print(f"[{datetime.now()}] 🔄 BTC: Checking expiry rollover... (Current: {self.active_expiry}, Time: {current_time_str})")
+            
+            next_expiry = self.should_rollover_expiry()
+            if next_expiry and next_expiry != self.active_expiry:
+                print(f"[{datetime.now()}] 🎯 BTC: EXPIRY ROLLOVER TRIGGERED!")
+                print(f"[{datetime.now()}] 📅 BTC: Changing from {self.active_expiry} to {next_expiry}")
+                
+                actual_next_expiry = self.get_next_available_expiry(self.active_expiry)
+                
+                if actual_next_expiry != self.active_expiry:
+                    self.active_expiry = actual_next_expiry
+                    self.expiry_rollover_count += 1
+                    
+                    self.options_prices = {}
+                    self.active_symbols = []
+                    
+                    send_telegram(f"🔄 BTC Expiry Rollover Complete!\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_str}")
+                    return True
+                else:
+                    print(f"[{datetime.now()}] ⚠️ BTC: No new expiry available yet, keeping: {self.active_expiry}")
+            
+            available_expiries = self.get_available_expiries()
+            if available_expiries and self.active_expiry not in available_expiries:
+                print(f"[{datetime.now()}] ⚠️ BTC: Current expiry {self.active_expiry} no longer available!")
+                next_available = self.get_next_available_expiry(self.active_expiry)
+                if next_available != self.active_expiry:
+                    print(f"[{datetime.now()}] 🔄 BTC: Switching to available expiry: {next_available}")
+                    self.active_expiry = next_available
+                    self.expiry_rollover_count += 1
+                    
+                    self.options_prices = {}
+                    self.active_symbols = []
+                    
+                    send_telegram(f"🔄 BTC Expiry Update!\n\n📅 Now monitoring: {self.active_expiry}\n⏰ Time: {current_time_str}")
+                    return True
+        
+        return False
+
+    def extract_expiry_from_symbol(self, symbol):
+        """Extract expiry date from symbol string"""
+        try:
+            parts = symbol.split('-')
+            if len(parts) >= 4:
+                return parts[3]
+            return None
+        except:
+            return None
+
+    def extract_strike(self, symbol):
+        """Extract strike price from symbol"""
+        try:
+            parts = symbol.split('-')
+            for part in parts:
+                if part.isdigit() and len(part) > 2:
+                    return int(part)
+            return 0
+        except:
+            return 0
 
     def debug_log(self, message, force=False):
         """Debug logging with rate limiting"""
@@ -554,10 +714,11 @@ class BTCRESTBot:
             parts = symbol.split('-')
             if len(parts) >= 4:
                 expiry = parts[-1]
-                if expiry == self.current_expiry:
+                if expiry == self.active_expiry:
                     current_expiry_tickers.append(ticker)
 
-        self.debug_log(f"📅 BTC: Found {len(current_expiry_tickers)} tickers for expiry {self.current_expiry}")
+        self.active_symbols = [t.get('symbol', '') for t in current_expiry_tickers]
+        self.debug_log(f"📅 BTC: Found {len(current_expiry_tickers)} tickers for expiry {self.active_expiry}")
         
         if current_expiry_tickers and self.fetch_count % 10 == 0:
             sample_symbols = [t.get('symbol', '') for t in current_expiry_tickers[:3]]
@@ -629,7 +790,11 @@ class BTCRESTBot:
                     alert_key = f"BTC_CALL_{strike1}_{strike2}"
                     if self.can_alert(alert_key):
                         profit = abs(call_diff)
-                        alerts.append(f"🔷 BTC CALL {strike1:,} Ask: ${call1_ask:.2f} vs {strike2:,} Bid: ${call2_bid:.2f} → Profit: ${profit:.2f}")
+                        expiry_display = format_expiry_display(self.active_expiry)
+                        current_time = get_ist_time()
+                        
+                        alert_msg = f"🔔 BTC Alert Call\n{strike1} (B) → {strike2} (S)\n${call1_ask:.2f}    ${call2_bid:.2f}\nProfit: ${profit:.2f}\n{expiry_display} | {current_time}"
+                        alerts.append(alert_msg)
             
             # PUT arbitrage
             put1_bid = grouped_data[strike1]['put']['bid']
@@ -641,7 +806,11 @@ class BTCRESTBot:
                     alert_key = f"BTC_PUT_{strike1}_{strike2}"
                     if self.can_alert(alert_key):
                         profit = abs(put_diff)
-                        alerts.append(f"🟣 BTC PUT {strike1:,} Bid: ${put1_bid:.2f} vs {strike2:,} Ask: ${put2_ask:.2f} → Profit: ${profit:.2f}")
+                        expiry_display = format_expiry_display(self.active_expiry)
+                        current_time = get_ist_time()
+                        
+                        alert_msg = f"🔔 BTC Alert Put\n{strike2} (B) → {strike1} (S)\n${put2_ask:.2f}    ${put1_bid:.2f}\nProfit: ${profit:.2f}\n{expiry_display} | {current_time}"
+                        alerts.append(alert_msg)
         
         return alerts
 
@@ -656,9 +825,16 @@ class BTCRESTBot:
     def start_monitoring(self):
         self.debug_log("🤖 BTC: Starting Options Monitoring", force=True)
         
+        # Send connection notification
+        current_time_str = get_ist_time()
+        send_telegram(f"🔗 BTC Bot Connected\n\n📅 Monitoring: {self.active_expiry}\n📊 Symbols: {len(self.active_symbols)}\n⏰ Time: {current_time_str}\n\nBTC Bot is now live! 🚀")
+        
         while self.running:
             try:
                 self.fetch_count += 1
+                
+                # Check expiry rollover
+                self.check_and_update_expiry()
                 
                 # Process data
                 grouped_data = self.process_btc_options()
@@ -667,20 +843,14 @@ class BTCRESTBot:
                 alerts = self.check_arbitrage(grouped_data)
                 
                 if alerts:
-                    current_time_ist = get_ist_time()  # FIXED: Using correct IST time
-                    
-                    message = f"🚨 *BTC {self.current_expiry} ARBITRAGE ALERTS* 🚨\n\n" + "\n".join(alerts)
-                    message += f"\n\n_Expiry: {self.current_expiry}_"
-                    message += f"\n_Time: {current_time_ist}_"  # FIXED: Correct IST time
-                    message += f"\n_Threshold: ${DELTA_THRESHOLD['BTC']}_"
-                    
-                    send_telegram(message)
-                    self.alert_count += len(alerts)
-                    self.debug_log(f"✅ BTC: Sent {len(alerts)} alerts")
+                    for alert in alerts:
+                        send_telegram(alert)
+                        self.alert_count += 1
+                        self.debug_log(f"✅ BTC: Sent arbitrage alert")
                 
                 # Progress update
                 if self.fetch_count % 30 == 0:
-                    self.debug_log(f"📊 BTC: Stats: Fetches={self.fetch_count}, Alerts={self.alert_count}, Strikes={len(grouped_data)}")
+                    self.debug_log(f"📊 BTC: Stats: Fetches={self.fetch_count}, Alerts={self.alert_count}, Strikes={len(grouped_data)}, Symbols={len(self.active_symbols)}")
                 
                 sleep(BTC_FETCH_INTERVAL)
                 
@@ -704,33 +874,287 @@ btc_bot = BTCRESTBot()
 def home():
     eth_status = "✅ Connected" if eth_bot.connected else "🔴 Disconnected"
     btc_status = "✅ Running" if btc_bot.running else "🔴 Stopped"
-    current_time_ist = get_ist_time()
+    current_time_str = get_ist_time()
     
-    return f"""
-    <h1>Dual Asset Options Arbitrage Bot</h1>
-    
-    <h2>ETH (WebSocket)</h2>
-    <p>Status: {eth_status}</p>
-    <p>Messages: {eth_bot.message_count}</p>
-    <p>ETH Symbols: {len(eth_bot.options_prices)}</p>
-    <p>Active Expiry: {eth_bot.active_expiry}</p>
-    <p>ETH Alerts: {eth_bot.alert_count}</p>
-    <p>ETH Threshold: ${DELTA_THRESHOLD['ETH']}</p>
-    
-    <h2>BTC (REST API)</h2>
-    <p>Status: {btc_status}</p>
-    <p>Fetches: {btc_bot.fetch_count}</p>
-    <p>BTC Alerts: {btc_bot.alert_count}</p>
-    <p>Current Expiry: {btc_bot.current_expiry}</p>
-    <p>BTC Threshold: ${DELTA_THRESHOLD['BTC']}</p>
-    
-    <p>Last Update: {current_time_ist}</p>
-    <p><a href="/health">Health Check</a></p>
-    """
+    return f'''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Dual Asset Options Arbitrage Bot</title>
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+            }}
+            .header {{
+                text-align: center;
+                color: white;
+                margin-bottom: 30px;
+            }}
+            .header h1 {{
+                font-size: 2.5rem;
+                margin-bottom: 10px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            }}
+            .stats-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }}
+            .stat-card {{
+                background: white;
+                padding: 25px;
+                border-radius: 15px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            }}
+            .stat-card h2 {{
+                color: #333;
+                margin-bottom: 15px;
+                font-size: 1.4rem;
+                border-bottom: 2px solid #f0f0f0;
+                padding-bottom: 10px;
+            }}
+            .stat-item {{
+                margin-bottom: 8px;
+                font-size: 1.1rem;
+                color: #555;
+            }}
+            .threshold-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+                gap: 25px;
+            }}
+            .threshold-card {{
+                background: white;
+                padding: 30px;
+                border-radius: 20px;
+                box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+                text-align: center;
+            }}
+            .threshold-card h3 {{
+                color: #333;
+                margin-bottom: 20px;
+                font-size: 1.3rem;
+            }}
+            .current-value {{
+                font-size: 1.4rem;
+                color: #666;
+                margin-bottom: 25px;
+                font-weight: 500;
+            }}
+            .input-group {{
+                margin-bottom: 25px;
+            }}
+            .threshold-input {{
+                width: 100%;
+                padding: 15px;
+                font-size: 1.2rem;
+                border: 2px solid #e0e0e0;
+                border-radius: 10px;
+                text-align: center;
+                transition: all 0.3s ease;
+            }}
+            .threshold-input:focus {{
+                outline: none;
+                border-color: #667eea;
+                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            }}
+            .update-btn {{
+                width: 100%;
+                padding: 18px;
+                font-size: 1.2rem;
+                font-weight: 600;
+                border: none;
+                border-radius: 12px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }}
+            .eth-btn {{
+                background: linear-gradient(135deg, #667eea, #764ba2);
+                color: white;
+            }}
+            .eth-btn:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+            }}
+            .btc-btn {{
+                background: linear-gradient(135deg, #f093fb, #f5576c);
+                color: white;
+            }}
+            .btc-btn:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 8px 25px rgba(245, 87, 108, 0.4);
+            }}
+            .footer {{
+                text-align: center;
+                margin-top: 30px;
+                color: white;
+                font-size: 1.1rem;
+            }}
+            .alert-success {{
+                background: #d4edda;
+                color: #155724;
+                padding: 15px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                border: 1px solid #c3e6cb;
+            }}
+            @media (max-width: 768px) {{
+                .header h1 {{
+                    font-size: 2rem;
+                }}
+                .stat-card, .threshold-card {{
+                    padding: 20px;
+                }}
+                .update-btn {{
+                    padding: 15px;
+                    font-size: 1.1rem;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Dual Asset Options Arbitrage Bot</h1>
+            </div>
+
+            <!-- Success Message -->
+            {'<div class="alert-success">Threshold updated successfully! Telegram notification sent.</div>' if request.args.get('success') else ''}
+
+            <div class="stats-grid">
+                <!-- ETH Stats Card -->
+                <div class="stat-card">
+                    <h2>ETH (WebSocket)</h2>
+                    <div class="stat-item"><strong>Status:</strong> {eth_status}</div>
+                    <div class="stat-item"><strong>Messages:</strong> {eth_bot.message_count}</div>
+                    <div class="stat-item"><strong>ETH Symbols:</strong> {len(eth_bot.options_prices)}</div>
+                    <div class="stat-item"><strong>Active Expiry:</strong> {eth_bot.active_expiry}</div>
+                    <div class="stat-item"><strong>ETH Alerts:</strong> {eth_bot.alert_count}</div>
+                    <div class="stat-item"><strong>ETH Threshold:</strong> ${DELTA_THRESHOLD['ETH']:.2f}</div>
+                </div>
+
+                <!-- BTC Stats Card -->
+                <div class="stat-card">
+                    <h2>BTC (REST API)</h2>
+                    <div class="stat-item"><strong>Status:</strong> {btc_status}</div>
+                    <div class="stat-item"><strong>Fetches:</strong> {btc_bot.fetch_count}</div>
+                    <div class="stat-item"><strong>BTC Symbols:</strong> {len(btc_bot.active_symbols)}</div>
+                    <div class="stat-item"><strong>Active Expiry:</strong> {btc_bot.active_expiry}</div>
+                    <div class="stat-item"><strong>BTC Alerts:</strong> {btc_bot.alert_count}</div>
+                    <div class="stat-item"><strong>BTC Threshold:</strong> ${DELTA_THRESHOLD['BTC']:.2f}</div>
+                </div>
+            </div>
+
+            <div class="threshold-grid">
+                <!-- ETH Threshold Card -->
+                <div class="threshold-card">
+                    <h3>Update ETH Threshold</h3>
+                    <div class="current-value">Current: ${DELTA_THRESHOLD['ETH']:.2f}</div>
+                    <form action="/update_eth_threshold" method="POST">
+                        <div class="input-group">
+                            <input type="number" name="threshold" value="{DELTA_THRESHOLD['ETH']:.2f}" step="0.01" min="0.01" max="10" 
+                                   class="threshold-input" required placeholder="Enter ETH threshold">
+                        </div>
+                        <button type="submit" class="update-btn eth-btn">UPDATE ETH</button>
+                    </form>
+                </div>
+
+                <!-- BTC Threshold Card -->
+                <div class="threshold-card">
+                    <h3>Update BTC Threshold</h3>
+                    <div class="current-value">Current: ${DELTA_THRESHOLD['BTC']:.2f}</div>
+                    <form action="/update_btc_threshold" method="POST">
+                        <div class="input-group">
+                            <input type="number" name="threshold" value="{DELTA_THRESHOLD['BTC']:.2f}" step="0.01" min="0.01" max="50" 
+                                   class="threshold-input" required placeholder="Enter BTC threshold">
+                        </div>
+                        <button type="submit" class="update-btn btc-btn">UPDATE BTC</button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="footer">
+                <p>Last Update: {current_time_str}</p>
+                <p><a href="/health" style="color: white; text-decoration: underline;">Health Check</a></p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+
+@app.route('/update_eth_threshold', methods=['POST'])
+def update_eth_threshold():
+    """Update ETH threshold"""
+    try:
+        new_threshold = float(request.form['threshold'])
+        if new_threshold <= 0:
+            return "Threshold must be positive", 400
+        
+        old_threshold = DELTA_THRESHOLD['ETH']
+        DELTA_THRESHOLD['ETH'] = new_threshold
+        
+        # Send Telegram notification
+        current_time_str = get_ist_time()
+        send_telegram(f"⚙️ ETH Threshold Updated\n\n📊 New Value: ${new_threshold:.2f}\n⏰ Time: {current_time_str}\n\nThreshold changed successfully!")
+        
+        print(f"[{datetime.now()}] ✅ ETH threshold updated: ${old_threshold:.2f} → ${new_threshold:.2f}")
+        
+        return redirect_with_success()
+    except ValueError:
+        return "Invalid threshold value", 400
+    except Exception as e:
+        print(f"[{datetime.now()}] ❌ Error updating ETH threshold: {e}")
+        return "Error updating threshold", 500
+
+@app.route('/update_btc_threshold', methods=['POST'])
+def update_btc_threshold():
+    """Update BTC threshold"""
+    try:
+        new_threshold = float(request.form['threshold'])
+        if new_threshold <= 0:
+            return "Threshold must be positive", 400
+        
+        old_threshold = DELTA_THRESHOLD['BTC']
+        DELTA_THRESHOLD['BTC'] = new_threshold
+        
+        # Send Telegram notification
+        current_time_str = get_ist_time()
+        send_telegram(f"⚙️ BTC Threshold Updated\n\n📊 New Value: ${new_threshold:.2f}\n⏰ Time: {current_time_str}\n\nThreshold changed successfully!")
+        
+        print(f"[{datetime.now()}] ✅ BTC threshold updated: ${old_threshold:.2f} → ${new_threshold:.2f}")
+        
+        return redirect_with_success()
+    except ValueError:
+        return "Invalid threshold value", 400
+    except Exception as e:
+        print(f"[{datetime.now()}] ❌ Error updating BTC threshold: {e}")
+        return "Error updating threshold", 500
+
+def redirect_with_success():
+    """Redirect to home with success parameter"""
+    from flask import redirect
+    return redirect('/?success=true')
 
 @app.route('/health')
 def health():
-    current_time_ist = get_ist_time()
+    current_time_str = get_ist_time()
     
     return {
         "eth": {
@@ -744,11 +1168,12 @@ def health():
         "btc": {
             "running": btc_bot.running,
             "fetch_count": btc_bot.fetch_count,
+            "symbols_tracked": len(btc_bot.active_symbols),
+            "active_expiry": btc_bot.active_expiry,
             "alerts_sent": btc_bot.alert_count,
-            "current_expiry": btc_bot.current_expiry,
             "threshold": DELTA_THRESHOLD['BTC']
         },
-        "current_time_ist": current_time_ist
+        "current_time": current_time_str
     }, 200
 
 @app.route('/start_btc')
@@ -775,8 +1200,8 @@ def start_bots():
     print("="*60)
     print("Dual Asset Options Arbitrage Bot")
     print("="*60)
-    print(f"⚡ ETH Threshold: ${DELTA_THRESHOLD['ETH']}")
-    print(f"⚡ BTC Threshold: ${DELTA_THRESHOLD['BTC']}")
+    print(f"⚡ ETH Threshold: ${DELTA_THRESHOLD['ETH']:.2f}")
+    print(f"⚡ BTC Threshold: ${DELTA_THRESHOLD['BTC']:.2f}")
     print(f"📅 Current expiry: {get_current_expiry()}")
     print("="*60)
     
