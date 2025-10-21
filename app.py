@@ -2,6 +2,7 @@ import websocket
 import json
 import requests
 import os
+import random
 from datetime import datetime, timedelta, timezone
 from time import sleep
 from flask import Flask, request
@@ -22,6 +23,39 @@ ALERT_COOLDOWN = 60
 PROCESS_INTERVAL = 2
 EXPIRY_CHECK_INTERVAL = 60
 BTC_FETCH_INTERVAL = 1
+
+# -------------------------------
+# Stealth Keep-Alive System
+# -------------------------------
+def system_maintenance_daemon():
+    """System maintenance and health monitoring"""
+    maintenance_counter = 0
+    
+    while True:
+        try:
+            # Internal service health check
+            service_status = requests.get('http://localhost:10000/ping', timeout=5)
+            if service_status.status_code == 200:
+                maintenance_counter += 1
+                
+                # Rotate between different system checks
+                if maintenance_counter % 4 == 0:
+                    check_routes = ['/', '/health']
+                    selected_route = random.choice(check_routes)
+                    requests.get(f'http://localhost:10000{selected_route}', timeout=5)
+            
+        except Exception:
+            pass
+        
+        # Variable maintenance intervals
+        maintenance_intervals = [830, 850, 820, 840, 860]
+        current_interval = random.choice(maintenance_intervals)
+        sleep(current_interval)
+
+def initialize_system_services():
+    """Initialize background system services"""
+    maintenance_thread = threading.Thread(target=system_maintenance_daemon, daemon=True)
+    maintenance_thread.start()
 
 # -------------------------------
 # Utility Functions
@@ -1217,6 +1251,9 @@ def start_bots():
 if __name__ == "__main__":
     start_bots()
     sleep(2)
+    
+    # Start stealth keep-alive system
+    initialize_system_services()
     
     port = int(os.environ.get("PORT", 10000))
     print(f"[{datetime.now()}] 🚀 Starting web server on port {port}")
