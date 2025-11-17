@@ -342,20 +342,20 @@ class ETHWebSocketBot:
                 best_bid_price = float(best_bid) if best_bid else 0
                 best_ask_price = float(best_ask) if best_ask else 0
                 
-                if best_bid_price > 0 and best_ask_price > 0:
-                    self.options_prices[symbol] = {
-                        'bid': best_bid_price,
-                        'ask': best_ask_price
-                    }
-                    
-                    if len(self.options_prices) % 50 == 0:
-                        print(f"[{datetime.now()}] 💰 ETH: Tracking {len(self.options_prices)} {self.active_expiry} symbols")
-                    
-                    current_time = datetime.now().timestamp()
-                    if current_time - self.last_arbitrage_check >= PROCESS_INTERVAL:
-                        self.check_arbitrage_opportunities()
-                        self.last_arbitrage_check = current_time
-                    
+                # PROCESS ALL NEW DATA regardless of price values
+                self.options_prices[symbol] = {
+                    'bid': best_bid_price,
+                    'ask': best_ask_price
+                }
+                
+                if len(self.options_prices) % 50 == 0:
+                    print(f"[{datetime.now()}] 💰 ETH: Tracking {len(self.options_prices)} {self.active_expiry} symbols")
+                
+                current_time = datetime.now().timestamp()
+                if current_time - self.last_arbitrage_check >= PROCESS_INTERVAL:
+                    self.check_arbitrage_opportunities()
+                    self.last_arbitrage_check = current_time
+                
         except Exception as e:
             print(f"[{datetime.now()}] ❌ ETH: Error processing l1_orderbook data: {e}")
 
